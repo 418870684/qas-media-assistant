@@ -3,12 +3,17 @@ const state = {
   candidates: [],
   candidatePage: 1,
   candidatePageSize: 5,
+  currentView: "search",
+  renamePrefixTouched: false,
+  qasTasks: [],
   previewPath: [],
   lastPreviewFiles: []
 };
 
 const els = {
   status: document.querySelector("#status"),
+  viewTabs: document.querySelector("#viewTabs"),
+  viewPanels: document.querySelectorAll("[data-view-panel]"),
   messages: document.querySelector("#messages"),
   chatForm: document.querySelector("#chatForm"),
   chatInput: document.querySelector("#chatInput"),
@@ -36,7 +41,12 @@ const els = {
   loginForm: document.querySelector("#loginForm"),
   loginPassword: document.querySelector("#loginPassword"),
   loginError: document.querySelector("#loginError"),
-  logoutButton: document.querySelector("#logoutButton")
+  logoutButton: document.querySelector("#logoutButton"),
+  reloadQasTasks: document.querySelector("#reloadQasTasks"),
+  taskFilter: document.querySelector("#taskFilter"),
+  filterCurrentTask: document.querySelector("#filterCurrentTask"),
+  clearTaskFilter: document.querySelector("#clearTaskFilter"),
+  qasTaskList: document.querySelector("#qasTaskList")
 };
 
 boot();
@@ -82,12 +92,24 @@ els.taskForm.addEventListener("submit", async (event) => {
   if (result.success) {
     const runText = result.run ? `；立即运行${result.run.success ? "已通知" : "通知失败"}` : "";
     addMessage("assistant", `任务已创建：${task.taskname}${runText}`);
+    switchView("tasks");
+    els.taskFilter.value = task.taskname;
+    await loadTasks({ silent: true });
   } else {
     addMessage("assistant", `创建失败：${result.message || "QAS 没有返回明确原因"}`);
   }
 });
 
-els.refreshTasks.addEventListener("click", loadTasks);
+els.viewTabs.addEventListener("click", (event) => {
+  const view = event.target.dataset.view;
+  if (!view) return;
+  switchView(view);
+  if (view === "tasks" && !state.qasTasks.length) loadTasks({ silent: true });
+});
+els.refreshTasks.addEventListener("click", () => {
+  switchView("tasks");
+  loadTasks();
+});
 els.applyRename.addEventListener("click", () => {
   applyRenameRule();
   previewShare();
@@ -95,6 +117,22 @@ els.applyRename.addEventListener("click", () => {
 els.previewShare.addEventListener("click", previewShare);
 els.createAllDirs.addEventListener("click", createAllDirectoryTasks);
 els.cleanupMatchingTasks.addEventListener("click", cleanupCurrentTaskFamily);
+els.renamePrefix.addEventListener("input", () => {
+  state.renamePrefixTouched = true;
+});
+els.taskname.addEventListener("input", () => {
+  syncAutoRenamePrefix();
+});
+els.reloadQasTasks.addEventListener("click", () => loadTasks({ silent: true }));
+els.filterCurrentTask.addEventListener("click", () => {
+  els.taskFilter.value = taskFromForm().taskname;
+  renderQasTasks();
+});
+els.clearTaskFilter.addEventListener("click", () => {
+  els.taskFilter.value = "";
+  renderQasTasks();
+});
+els.taskFilter.addEventListener("input", renderQasTasks);
 els.logoutButton.addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" }, false);
   showLogin();
@@ -111,6 +149,7 @@ async function boot() {
 
 async function enterApp() {
   document.body.className = "auth-ready";
+  switchView("search");
   const config = await api("/api/config", { method: "GET" });
   if (config.success) {
     state.defaultSaveRoot = config.data.defaultSaveRoot || state.defaultSaveRoot;
@@ -134,26 +173,48 @@ async function checkHealth() {
   if (!result.success) addMessage("system", result.message || "QAS 连接失败，请检查配置。");
 }
 
+function switchView(view) {
+  state.currentView = view;
+  els.viewTabs.querySelectorAll("[data-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === view);
+  });
+  els.viewPanels.forEach((panel) => {
+    panel.classList.toggle("active-view", panel.dataset.viewPanel === view);
+  });
+}
+
 function handleChatResponse(data) {
   if (!data.success) {
     addMessage("assistant", data.message || "处理失败");
     return;
   }
   addMessage("assistant", data.message);
-  if (data.type === "search") renderCandidates(data.candidates || []);
-  if (data.type === "draft") fillTask(data.draft);
-  if (data.type === "tasks") renderTasks(data.tasks || []);
+  if (data.type === "search") {
+    switchView("search");
+    renderCandidates(data.candidates || []);
+  }
+  if (data.type === "draft") {
+    fillTask(data.draft);
+    switchView("create");
+  }
+  if (data.type === "tasks") {
+    state.qasTasks = data.tasks || [];
+    switchView("tasks");
+    renderQasTasks();
+  }
 }
 
-async function loadTasks() {
-  addMessage("user", "任务列表");
+async function loadTasks({ silent = false, filterCurrent = false } = {}) {
+  if (!silent) addMessage("user", "任务列表");
   const data = await api("/api/qas/tasks", { method: "GET" });
   if (!data.success) {
     addMessage("assistant", data.message || "获取任务失败");
     return;
   }
-  addMessage("assistant", data.data.length ? `当前有 ${data.data.length} 个任务。` : "当前还没有任务。");
-  renderTasks(data.data);
+  state.qasTasks = data.data || [];
+  if (filterCurrent) els.taskFilter.value = taskFromForm().taskname;
+  if (!silent) addMessage("assistant", state.qasTasks.length ? `当前有 ${state.qasTasks.length} 个任务。` : "当前还没有任务。");
+  renderQasTasks();
 }
 
 function renderCandidates(candidates) {
@@ -193,8 +254,8 @@ function renderCandidatePage() {
         pattern: "$TV",
         replace: ""
       });
-      els.renamePrefix.value = item.title.replace(/\s*(4K|1080P|2160P|臻彩).*$/i, "").trim();
       addMessage("assistant", `已填入第 ${index + 1} 个候选资源。`);
+      switchView("preview");
       loadSharePreview({ name: "顶层", shareUrl: item.shareurl, mode: "reset" });
     });
     els.results.append(card);
@@ -220,11 +281,24 @@ function renderCandidatePage() {
 }
 
 function renderTasks(tasks) {
+  state.qasTasks = tasks || [];
+  renderQasTasks();
+}
+
+function renderQasTasks() {
+  const keyword = els.taskFilter.value.trim();
+  const tasks = keyword
+    ? state.qasTasks.filter((task) => {
+        const text = [task.taskname, task.savepath, task.shareurl].join(" ");
+        return text.includes(keyword);
+      })
+    : state.qasTasks;
+
   if (!tasks.length) {
-    els.results.innerHTML = '<p class="empty">暂无任务。</p>';
+    els.qasTaskList.innerHTML = `<p class="empty">${keyword ? "没有匹配的 QAS 任务。" : "暂无任务。"}</p>`;
     return;
   }
-  els.results.innerHTML = "";
+  els.qasTaskList.innerHTML = "";
   tasks.forEach((task) => {
     const row = document.createElement("article");
     row.className = "task-row";
@@ -233,7 +307,7 @@ function renderTasks(tasks) {
       <p>${escapeHtml(task.savepath || "")}</p>
       <p>${escapeHtml(task.shareurl || "")}</p>
     `;
-    els.results.append(row);
+    els.qasTaskList.append(row);
   });
 }
 
@@ -243,7 +317,25 @@ function fillTask(task) {
   els.savepath.value = task.savepath || "";
   els.pattern.value = task.pattern || "$TV";
   els.replace.value = task.replace || "";
-  if (!els.renamePrefix.value && task.taskname) els.renamePrefix.value = task.taskname;
+  if (task.taskname) {
+    state.renamePrefixTouched = false;
+    syncAutoRenamePrefix(true);
+  }
+}
+
+function syncAutoRenamePrefix(force = false) {
+  if (state.renamePrefixTouched && !force) return;
+  els.renamePrefix.value = deriveRenamePrefix(els.taskname.value);
+}
+
+function deriveRenamePrefix(taskname) {
+  return String(taskname || "")
+    .replace(/[【\[]\s*更新至?\s*\d+\s*集?\s*[】\]]/gi, "")
+    .replace(/[【\[]\s*\d+\s*集全?\s*[】\]]/gi, "")
+    .replace(/\s*(4K|2160P|1080P|720P|高码|高码率|中字|国语|粤语|杜比|HDR|WEB-?DL|BluRay).*$/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/[：:]\s*$/, "")
+    .trim();
 }
 
 function taskFromForm() {
@@ -316,6 +408,7 @@ async function loadSharePreview({ name = "顶层", shareUrl, mode = "reset" }) {
   const files = buildRenamePreview(result.data || []);
   state.lastPreviewFiles = files;
   renderPreview(files);
+  switchView("preview");
 }
 
 function buildRenamePreview(files) {
@@ -482,6 +575,9 @@ async function createAllDirectoryTasks() {
     ? `\n失败：\n${failed.map(({ item, result }) => `- ${item.name}：${result.message || "QAS 没有返回明确原因"}`).join("\n")}`
     : "";
   addMessage("assistant", `${cleanupText}已创建 ${successCount} / ${results.length} 个目录任务。${failedText}`);
+  switchView("tasks");
+  els.taskFilter.value = baseTask.taskname;
+  await loadTasks({ silent: true });
 }
 
 async function buildOneLevelTaskPlan(baseTask) {
@@ -654,6 +750,9 @@ async function cleanupCurrentTaskFamily() {
   if (result.success) {
     addMessage("assistant", result.message || `已删除 ${result.data?.removedCount || 0} 个同名旧任务。`);
     await checkHealth();
+    switchView("tasks");
+    els.taskFilter.value = baseTask.taskname;
+    await loadTasks({ silent: true });
   } else {
     addMessage("assistant", `删除失败：${result.message || "QAS 没有返回明确原因"}`);
   }
