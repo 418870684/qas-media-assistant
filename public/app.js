@@ -26,6 +26,8 @@ const els = {
   renamePad: document.querySelector("#renamePad"),
   applyRename: document.querySelector("#applyRename"),
   createAllDirs: document.querySelector("#createAllDirs"),
+  cleanupMatchingTasks: document.querySelector("#cleanupMatchingTasks"),
+  cleanupBeforeCreate: document.querySelector("#cleanupBeforeCreate"),
   previewShare: document.querySelector("#previewShare"),
   previewList: document.querySelector("#previewList"),
   previewCount: document.querySelector("#previewCount"),
@@ -92,6 +94,7 @@ els.applyRename.addEventListener("click", () => {
 });
 els.previewShare.addEventListener("click", previewShare);
 els.createAllDirs.addEventListener("click", createAllDirectoryTasks);
+els.cleanupMatchingTasks.addEventListener("click", cleanupCurrentTaskFamily);
 els.logoutButton.addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" }, false);
   showLogin();
@@ -427,7 +430,7 @@ async function createAllDirectoryTasks() {
     return;
   }
   if (!state.lastPreviewFiles.length) {
-    addMessage("assistant", "请先预览当前分享，再创建全部目录任务。");
+    addMessage("assistant", "请先预览当前分享，再选择目录任务。");
     return;
   }
 
@@ -435,18 +438,35 @@ async function createAllDirectoryTasks() {
   els.createAllDirs.textContent = "扫描中";
   const plan = await buildOneLevelTaskPlan(baseTask);
   els.createAllDirs.disabled = false;
-  els.createAllDirs.textContent = "创建全部目录任务";
+  els.createAllDirs.textContent = "选择目录任务";
 
   if (!plan.length) {
     addMessage("assistant", "当前目录和下一级目录里没有找到可转存的视频文件。");
     return;
   }
-  if (!confirmDirectoryTaskPlan(plan)) return;
+  const selectedPlan = await selectDirectoryTaskPlan(plan);
+  if (!selectedPlan.length) {
+    addMessage("assistant", "没有选择要创建的目录任务。");
+    return;
+  }
 
   els.createAllDirs.disabled = true;
   els.createAllDirs.textContent = "创建中";
+  let cleanupText = "";
+  if (els.cleanupBeforeCreate.checked) {
+    const cleanup = await deleteQasTasksByNames(selectedPlan.map((item) => item.task.taskname));
+    cleanupText = cleanup.success && cleanup.data?.removedCount
+      ? `已清理 ${cleanup.data.removedCount} 个同名旧任务。`
+      : "";
+    if (!cleanup.success) {
+      els.createAllDirs.disabled = false;
+      els.createAllDirs.textContent = "选择目录任务";
+      addMessage("assistant", `清理旧任务失败：${cleanup.message || "QAS 没有返回明确原因"}`);
+      return;
+    }
+  }
   const results = [];
-  for (const item of plan) {
+  for (const item of selectedPlan) {
     const result = await api("/api/tasks", {
       method: "POST",
       body: JSON.stringify({ ...item.task, runNow: els.runNow.checked })
@@ -454,14 +474,14 @@ async function createAllDirectoryTasks() {
     results.push({ item, result });
   }
   els.createAllDirs.disabled = false;
-  els.createAllDirs.textContent = "创建全部目录任务";
+  els.createAllDirs.textContent = "选择目录任务";
 
   const successCount = results.filter(({ result }) => result.success).length;
   const failed = results.filter(({ result }) => !result.success);
   const failedText = failed.length
     ? `\n失败：\n${failed.map(({ item, result }) => `- ${item.name}：${result.message || "QAS 没有返回明确原因"}`).join("\n")}`
     : "";
-  addMessage("assistant", `已创建 ${successCount} / ${results.length} 个目录任务。${failedText}`);
+  addMessage("assistant", `${cleanupText}已创建 ${successCount} / ${results.length} 个目录任务。${failedText}`);
 }
 
 async function buildOneLevelTaskPlan(baseTask) {
@@ -514,18 +534,142 @@ async function buildOneLevelTaskPlan(baseTask) {
   return plan.filter((item) => item.videoCount > 0);
 }
 
-function confirmDirectoryTaskPlan(plan) {
-  const lines = [
-    `将创建 ${plan.length} 个 QAS 任务：`,
-    ``,
-    ...plan.map((item, index) => [
-      `${index + 1}. ${item.name}`,
-      `   视频：${item.videoCount} 个`,
-      `   保存到：${item.savepath}`,
-      `   链接：${item.shareurl}`
-    ].join("\n"))
-  ];
-  return window.confirm(lines.join("\n\n"));
+function selectDirectoryTaskPlan(plan) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("section");
+    overlay.className = "task-picker-backdrop";
+    overlay.innerHTML = `
+      <div class="task-picker" role="dialog" aria-modal="true" aria-label="选择目录任务">
+        <header>
+          <div>
+            <p class="eyebrow">QAS TASK PICKER</p>
+            <h2>选择要保存的目录</h2>
+          </div>
+          <button class="ghost" type="button" data-action="cancel">取消</button>
+        </header>
+        <div class="task-picker-actions">
+          <label class="inline-check">
+            <input type="checkbox" data-action="select-all" checked />
+            <span>全选</span>
+          </label>
+          <small data-role="selected-count"></small>
+        </div>
+        <div class="task-picker-list">
+          ${plan.map((item, index) => `
+            <label class="task-choice">
+              <input type="checkbox" data-index="${index}" checked />
+              <span>
+                <strong>${escapeHtml(item.name)}</strong>
+                <em>${escapeHtml(item.videoCount)} 个视频</em>
+                <small>${escapeHtml(item.savepath)}</small>
+              </span>
+            </label>
+          `).join("")}
+        </div>
+        <footer>
+          <button type="button" data-action="cancel">取消</button>
+          <button class="primary" type="button" data-action="confirm">创建选中任务</button>
+        </footer>
+      </div>
+    `;
+
+    const checkboxes = () => [...overlay.querySelectorAll("input[data-index]")];
+    const selectedCount = overlay.querySelector("[data-role='selected-count']");
+    const confirmButton = overlay.querySelector("[data-action='confirm']");
+    const selectAll = overlay.querySelector("[data-action='select-all']");
+    const close = (value) => {
+      overlay.remove();
+      resolve(value);
+    };
+    const updateCount = () => {
+      const total = checkboxes().length;
+      const selected = checkboxes().filter((input) => input.checked).length;
+      selectedCount.textContent = `已选 ${selected} / ${total}`;
+      confirmButton.disabled = selected === 0;
+      selectAll.checked = selected === total;
+      selectAll.indeterminate = selected > 0 && selected < total;
+    };
+
+    overlay.addEventListener("change", (event) => {
+      if (event.target.dataset.action === "select-all") {
+        checkboxes().forEach((input) => {
+          input.checked = event.target.checked;
+        });
+      }
+      updateCount();
+    });
+    overlay.addEventListener("click", (event) => {
+      if (event.target.dataset.action === "cancel") close([]);
+      if (event.target.dataset.action === "confirm") {
+        const selected = checkboxes()
+          .filter((input) => input.checked)
+          .map((input) => plan[Number(input.dataset.index)])
+          .filter(Boolean);
+        close(selected);
+      }
+    });
+
+    document.body.append(overlay);
+    updateCount();
+  });
+}
+
+async function cleanupCurrentTaskFamily() {
+  const baseTask = taskFromForm();
+  if (!baseTask.taskname) {
+    addMessage("assistant", "请先填写任务名，再清理同名旧任务。");
+    return;
+  }
+
+  els.cleanupMatchingTasks.disabled = true;
+  els.cleanupMatchingTasks.textContent = "检查中";
+  const data = await api("/api/qas/tasks", { method: "GET" });
+  els.cleanupMatchingTasks.disabled = false;
+  els.cleanupMatchingTasks.textContent = "清理同名旧任务";
+
+  if (!data.success) {
+    addMessage("assistant", data.message || "获取 QAS 任务失败");
+    return;
+  }
+
+  const names = [...new Set((data.data || [])
+    .map((task) => String(task.taskname || "").trim())
+    .filter((name) => isSameTaskFamilyName(name, baseTask.taskname)))];
+
+  if (!names.length) {
+    addMessage("assistant", "没有找到同名旧任务。");
+    return;
+  }
+
+  const preview = names.slice(0, 12).map((name, index) => `${index + 1}. ${name}`).join("\n");
+  const more = names.length > 12 ? `\n...还有 ${names.length - 12} 类同名任务` : "";
+  if (!window.confirm(`将删除 QAS 中这些同名旧任务：\n\n${preview}${more}\n\n确认删除吗？`)) return;
+
+  els.cleanupMatchingTasks.disabled = true;
+  els.cleanupMatchingTasks.textContent = "删除中";
+  const result = await deleteQasTasksByNames(names);
+  els.cleanupMatchingTasks.disabled = false;
+  els.cleanupMatchingTasks.textContent = "清理同名旧任务";
+
+  if (result.success) {
+    addMessage("assistant", result.message || `已删除 ${result.data?.removedCount || 0} 个同名旧任务。`);
+    await checkHealth();
+  } else {
+    addMessage("assistant", `删除失败：${result.message || "QAS 没有返回明确原因"}`);
+  }
+}
+
+async function deleteQasTasksByNames(tasknames) {
+  return api("/api/qas/tasks/delete", {
+    method: "POST",
+    body: JSON.stringify({ tasknames })
+  });
+}
+
+function isSameTaskFamilyName(name, baseName) {
+  const current = String(name || "").trim();
+  const base = String(baseName || "").trim();
+  return Boolean(base && (current === base || current.startsWith(`${base} `)));
 }
 
 function currentPreviewName() {
