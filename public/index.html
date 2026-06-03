@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>QAS Media Assistant</title>
-    <link rel="stylesheet" href="/styles.css?v=14" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
   </head>
   <body class="auth-loading">
     <section class="login-shell" id="loginShell" aria-label="登录">
@@ -22,17 +22,25 @@
     </section>
 
     <main class="shell" id="appShell">
-      <section class="search-column" aria-label="搜索资源">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">QAS MEDIA ASSISTANT</p>
-            <h1>影视资源转存台</h1>
-          </div>
-          <div class="top-actions">
-            <div class="status" id="status">连接中</div>
-            <button class="ghost" id="logoutButton" type="button">退出</button>
-          </div>
-        </header>
+      <header class="topbar app-header">
+        <div>
+          <p class="eyebrow">QAS MEDIA ASSISTANT</p>
+          <h1>影视资源转存台</h1>
+        </div>
+        <div class="top-actions">
+          <div class="status" id="status">连接中</div>
+          <button class="ghost" id="logoutButton" type="button">退出</button>
+        </div>
+      </header>
+
+      <nav class="view-tabs" id="viewTabs" aria-label="功能切换">
+        <button class="active" type="button" data-view="search">搜索资源</button>
+        <button type="button" data-view="preview">资源预览</button>
+        <button type="button" data-view="create">创建任务</button>
+        <button type="button" data-view="tasks">QAS任务</button>
+      </nav>
+
+      <section class="search-column active-view" data-view-panel="search" aria-label="搜索资源">
 
         <form class="composer" id="chatForm">
           <input id="chatInput" autocomplete="off" placeholder="搜索 凡人修仙传 / 任务列表 / 粘贴夸克分享链接" />
@@ -55,7 +63,7 @@
         </div>
       </section>
 
-      <section class="preview-column" aria-label="资源预览">
+      <section class="preview-column" data-view-panel="preview" aria-label="资源预览">
         <div class="panel-section preview-section">
           <div class="section-title">
             <span>资源预览</span>
@@ -70,7 +78,7 @@
         </div>
       </section>
 
-      <aside class="task-column" aria-label="创建任务">
+      <aside class="task-column" data-view-panel="create" aria-label="创建任务">
         <form class="panel-section task-form" id="taskForm">
           <div class="section-title">
             <span>创建任务</span>
@@ -130,8 +138,25 @@
           <button class="primary" type="submit">创建 QAS 任务</button>
         </form>
       </aside>
+
+      <section class="qas-column" data-view-panel="tasks" aria-label="QAS任务">
+        <div class="panel-section qas-section">
+          <div class="section-title">
+            <span>QAS任务</span>
+            <button class="ghost" id="reloadQasTasks" type="button">刷新</button>
+          </div>
+          <div class="task-filter-row">
+            <input id="taskFilter" autocomplete="off" placeholder="按当前任务名过滤，或输入关键词" />
+            <button id="filterCurrentTask" type="button">当前任务</button>
+            <button id="clearTaskFilter" type="button">全部</button>
+          </div>
+          <div class="results qas-task-list" id="qasTaskList">
+            <p class="empty">点击刷新查看 QAS 任务。</p>
+          </div>
+        </div>
+      </section>
     </main>
 
-    <script src="/app.js?v=14"></script>
+    <script src="/app.js?v=16"></script>
   </body>
 </html>
