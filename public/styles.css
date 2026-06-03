@@ -549,6 +549,10 @@ label {
   gap: 10px;
 }
 
+.tool-row .wide-action {
+  grid-column: 1 / -1;
+}
+
 .toggle {
   display: flex;
   align-items: center;
