@@ -132,6 +132,12 @@ async function handleApi(req, res, url) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/qas/tasks/delete") {
+    const body = await readJson(req);
+    const result = await deleteQasTasksByName(body.tasknames || []);
+    return sendJson(res, result.success ? 200 : 502, result);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/search") {
     const q = url.searchParams.get("q") || "";
     const depth = url.searchParams.get("depth") || env.searchDepth;
@@ -270,6 +276,61 @@ async function addTask(input) {
   });
 }
 
+async function deleteQasTasksByName(tasknames) {
+  const names = new Set(
+    (Array.isArray(tasknames) ? tasknames : [])
+      .map((name) => String(name || "").trim())
+      .filter(Boolean)
+  );
+  if (!names.size) return { success: false, message: "没有收到要删除的任务名" };
+
+  const data = await qasData();
+  if (!data.success) return data;
+  const tasks = Array.isArray(data.data?.tasklist) ? data.data.tasklist : [];
+  const kept = [];
+  const removed = [];
+
+  for (const task of tasks) {
+    if (names.has(String(task.taskname || "").trim())) removed.push(task);
+    else kept.push(task);
+  }
+
+  if (!removed.length) {
+    return {
+      success: true,
+      message: "没有找到同名旧任务",
+      data: { removedCount: 0, removedTasks: [] }
+    };
+  }
+
+  const result = await qasFetch("/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tasklist: kept })
+  });
+
+  if (!result.success) {
+    return {
+      success: false,
+      message: result.message || "删除 QAS 任务失败",
+      data: result.data
+    };
+  }
+
+  return {
+    success: true,
+    message: `已删除 ${removed.length} 个 QAS 任务`,
+    data: {
+      removedCount: removed.length,
+      removedTasks: removed.map((task) => ({
+        taskname: task.taskname || "",
+        savepath: task.savepath || "",
+        shareurl: task.shareurl || ""
+      }))
+    }
+  };
+}
+
 async function getShareDetail(input) {
   const task = normalizeTask(input.task || input);
   const shareurl = String(input.shareurl || task.shareurl || "").trim();
@@ -383,10 +444,11 @@ function normalizeTask(input = {}) {
 function normalizeCandidate(raw, index) {
   const shareurl = raw.shareurl || raw.shareUrl || raw.url || raw.link || extractShareUrl(JSON.stringify(raw));
   const title = raw.taskname || raw.title || raw.name || raw.text || raw.label || `候选资源 ${index + 1}`;
+  const source = raw.source || raw.sourceName || raw.source_name || raw.site || raw.provider || raw.engine || raw.from || "盘搜";
   return {
     title: String(title),
     shareurl: String(shareurl || ""),
-    source: raw.source || raw.site || raw.provider || "",
+    source: String(source),
     note: raw.note || raw.desc || raw.description || ""
   };
 }
