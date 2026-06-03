@@ -25,6 +25,7 @@ const els = {
   renameStart: document.querySelector("#renameStart"),
   renamePad: document.querySelector("#renamePad"),
   applyRename: document.querySelector("#applyRename"),
+  createAllDirs: document.querySelector("#createAllDirs"),
   previewShare: document.querySelector("#previewShare"),
   previewList: document.querySelector("#previewList"),
   previewCount: document.querySelector("#previewCount"),
@@ -90,6 +91,7 @@ els.applyRename.addEventListener("click", () => {
   previewShare();
 });
 els.previewShare.addEventListener("click", previewShare);
+els.createAllDirs.addEventListener("click", createAllDirectoryTasks);
 els.logoutButton.addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" }, false);
   showLogin();
@@ -292,6 +294,7 @@ async function loadSharePreview({ name = "顶层", shareUrl, mode = "reset" }) {
   } else if (!state.previewPath.length) {
     state.previewPath = [{ name, shareUrl: targetShareUrl }];
   }
+  syncTaskShareUrlToPreview();
   renderBreadcrumb();
 
   const result = await api("/api/share-detail", {
@@ -374,6 +377,7 @@ function renderPreview(files) {
     back.addEventListener("click", () => {
       state.previewPath.pop();
       const parent = state.previewPath[state.previewPath.length - 1];
+      syncTaskShareUrlToPreview();
       loadSharePreview({ ...parent, mode: "refresh" });
     });
     els.previewList.append(back);
@@ -410,6 +414,129 @@ function renderPreview(files) {
     els.previewList.append(row);
   });
   renderBreadcrumb();
+}
+
+async function createAllDirectoryTasks() {
+  const baseTask = taskFromForm();
+  const missing = [];
+  if (!baseTask.taskname) missing.push("任务名");
+  if (!baseTask.shareurl) missing.push("分享链接");
+  if (!baseTask.savepath) missing.push("保存目录");
+  if (missing.length) {
+    addMessage("assistant", `请先补全：${missing.join("、")}。`);
+    return;
+  }
+  if (!state.lastPreviewFiles.length) {
+    addMessage("assistant", "请先预览当前分享，再创建全部目录任务。");
+    return;
+  }
+
+  els.createAllDirs.disabled = true;
+  els.createAllDirs.textContent = "扫描中";
+  const plan = await buildOneLevelTaskPlan(baseTask);
+  els.createAllDirs.disabled = false;
+  els.createAllDirs.textContent = "创建全部目录任务";
+
+  if (!plan.length) {
+    addMessage("assistant", "当前目录和下一级目录里没有找到可转存的视频文件。");
+    return;
+  }
+  if (!confirmDirectoryTaskPlan(plan)) return;
+
+  els.createAllDirs.disabled = true;
+  els.createAllDirs.textContent = "创建中";
+  const results = [];
+  for (const item of plan) {
+    const result = await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ ...item.task, runNow: els.runNow.checked })
+    });
+    results.push({ item, result });
+  }
+  els.createAllDirs.disabled = false;
+  els.createAllDirs.textContent = "创建全部目录任务";
+
+  const successCount = results.filter(({ result }) => result.success).length;
+  const failed = results.filter(({ result }) => !result.success);
+  const failedText = failed.length
+    ? `\n失败：\n${failed.map(({ item, result }) => `- ${item.name}：${result.message || "QAS 没有返回明确原因"}`).join("\n")}`
+    : "";
+  addMessage("assistant", `已创建 ${successCount} / ${results.length} 个目录任务。${failedText}`);
+}
+
+async function buildOneLevelTaskPlan(baseTask) {
+  const plan = [];
+  const currentVideos = state.lastPreviewFiles.filter((file) => !file.isDir && isVideoFile(file.name));
+  if (currentVideos.length) {
+    plan.push({
+      name: currentPreviewName(),
+      videoCount: currentVideos.length,
+      savepath: baseTask.savepath,
+      shareurl: baseTask.shareurl,
+      task: { ...baseTask }
+    });
+  }
+
+  const dirs = state.lastPreviewFiles.filter((file) => file.isDir && file.childShareUrl);
+  for (const dir of dirs) {
+    const dirTask = {
+      ...baseTask,
+      taskname: `${baseTask.taskname} ${dir.name}`.trim(),
+      shareurl: dir.childShareUrl,
+      savepath: joinSavePath(baseTask.savepath, cleanPathName(dir.name))
+    };
+    const result = await api("/api/share-detail", {
+      method: "POST",
+      body: JSON.stringify({ shareurl: dir.childShareUrl, task: dirTask })
+    });
+    if (!result.success) {
+      plan.push({
+        name: dir.name,
+        videoCount: 0,
+        savepath: dirTask.savepath,
+        shareurl: dirTask.shareurl,
+        error: result.message || "读取目录失败",
+        task: dirTask
+      });
+      continue;
+    }
+    const videos = (result.data || []).filter((file) => !file.isDir && isVideoFile(file.name));
+    if (videos.length) {
+      plan.push({
+        name: dir.name,
+        videoCount: videos.length,
+        savepath: dirTask.savepath,
+        shareurl: dirTask.shareurl,
+        task: dirTask
+      });
+    }
+  }
+  return plan.filter((item) => item.videoCount > 0);
+}
+
+function confirmDirectoryTaskPlan(plan) {
+  const lines = [
+    `将创建 ${plan.length} 个 QAS 任务：`,
+    ``,
+    ...plan.map((item, index) => [
+      `${index + 1}. ${item.name}`,
+      `   视频：${item.videoCount} 个`,
+      `   保存到：${item.savepath}`,
+      `   链接：${item.shareurl}`
+    ].join("\n"))
+  ];
+  return window.confirm(lines.join("\n\n"));
+}
+
+function currentPreviewName() {
+  const current = state.previewPath[state.previewPath.length - 1];
+  return current?.name || "当前目录";
+}
+
+function joinSavePath(base, name) {
+  const left = String(base || "").replace(/\/+$/, "");
+  const right = String(name || "").replace(/^\/+/, "");
+  return right ? `${left}/${right}` : left;
 }
 
 function previewStats(files) {
@@ -459,6 +586,7 @@ function renderBreadcrumb() {
     button.disabled = index === state.previewPath.length - 1;
     button.addEventListener("click", () => {
       state.previewPath = state.previewPath.slice(0, index + 1);
+      syncTaskShareUrlToPreview();
       loadSharePreview({ ...state.previewPath[index], mode: "refresh" });
     });
     els.breadcrumb.append(button);
@@ -468,6 +596,11 @@ function renderBreadcrumb() {
       els.breadcrumb.append(separator);
     }
   });
+}
+
+function syncTaskShareUrlToPreview() {
+  const current = state.previewPath[state.previewPath.length - 1];
+  if (current?.shareUrl) els.shareurl.value = current.shareUrl;
 }
 
 function episodeNumber(name) {
@@ -544,6 +677,7 @@ function confirmTask(task) {
     ``,
     `任务名：${task.taskname}`,
     `保存目录：${task.savepath}`,
+    `分享链接：${task.shareurl}`,
     `立即运行：${els.runNow.checked ? "是" : "否"}`,
     preview ? `预览示例：\n${preview}` : `尚未读取文件预览。`
   ];
