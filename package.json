@@ -1,0 +1,13 @@
+{
+  "name": "qas-media-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chat-style web and bot assistant for QAS media search and Quark auto-save tasks.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

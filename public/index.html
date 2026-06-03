@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QAS Media Assistant</title>
+    <link rel="stylesheet" href="/styles.css?v=12" />
+  </head>
+  <body class="auth-loading">
+    <section class="login-shell" id="loginShell" aria-label="登录">
+      <form class="login-card" id="loginForm">
+        <p class="eyebrow">QAS MEDIA ASSISTANT</p>
+        <h1>影视资源转存台</h1>
+        <p class="login-copy">请输入访问密码后继续。</p>
+        <label>
+          <span>访问密码</span>
+          <input id="loginPassword" type="password" autocomplete="current-password" autofocus />
+        </label>
+        <button class="primary" type="submit">登录</button>
+        <p class="login-error" id="loginError"></p>
+      </form>
+    </section>
+
+    <main class="shell" id="appShell">
+      <section class="search-column" aria-label="搜索资源">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">QAS MEDIA ASSISTANT</p>
+            <h1>影视资源转存台</h1>
+          </div>
+          <div class="top-actions">
+            <div class="status" id="status">连接中</div>
+            <button class="ghost" id="logoutButton" type="button">退出</button>
+          </div>
+        </header>
+
+        <form class="composer" id="chatForm">
+          <input id="chatInput" autocomplete="off" placeholder="搜索 凡人修仙传 / 任务列表 / 粘贴夸克分享链接" />
+          <button type="submit">发送</button>
+        </form>
+
+        <div class="panel-section">
+          <div class="section-title">
+            <span>候选资源</span>
+            <button class="ghost" id="refreshTasks" type="button">任务</button>
+          </div>
+          <div class="results" id="results">
+            <p class="empty">搜索后会显示候选资源。</p>
+          </div>
+        </div>
+        <div class="messages" id="messages">
+          <article class="message assistant">
+            <p>输入片名搜索，或者直接粘贴夸克分享链接。我会把候选资源整理成可以创建的 QAS 任务。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="preview-column" aria-label="资源预览">
+        <div class="panel-section preview-section">
+          <div class="section-title">
+            <span>资源预览</span>
+            <small id="previewCount">未预览</small>
+          </div>
+          <nav class="breadcrumb" id="breadcrumb" aria-label="目录路径">
+            <span>未选择资源</span>
+          </nav>
+          <div class="preview-list" id="previewList">
+            <p class="empty">选择候选资源后，先预览顶层目录，再进入目录查看具体文件。</p>
+          </div>
+        </div>
+      </section>
+
+      <aside class="task-column" aria-label="创建任务">
+        <form class="panel-section task-form" id="taskForm">
+          <div class="section-title">
+            <span>创建任务</span>
+            <label class="toggle">
+              <input id="runNow" type="checkbox" checked />
+              <span>立即运行</span>
+            </label>
+          </div>
+          <label>
+            <span>任务名</span>
+            <input id="taskname" required />
+          </label>
+          <label>
+            <span>分享链接</span>
+            <input id="shareurl" required />
+          </label>
+          <label>
+            <span>保存目录</span>
+            <input id="savepath" required />
+          </label>
+          <div class="grid-two">
+            <label>
+              <span>匹配规则</span>
+              <input id="pattern" value="$TV" />
+            </label>
+            <label>
+              <span>替换规则</span>
+              <input id="replace" />
+            </label>
+          </div>
+          <div class="rename-tools">
+            <div class="grid-three">
+              <label>
+                <span>命名前缀</span>
+                <input id="renamePrefix" placeholder="凡人修仙传" />
+              </label>
+              <label>
+                <span>起始集</span>
+                <input id="renameStart" type="number" min="0" value="1" />
+              </label>
+              <label>
+                <span>位数</span>
+                <input id="renamePad" type="number" min="1" max="4" value="3" />
+              </label>
+            </div>
+            <div class="tool-row">
+              <button id="applyRename" type="button">生成规则</button>
+              <button id="previewShare" type="button">预览文件</button>
+            </div>
+          </div>
+          <button class="primary" type="submit">创建 QAS 任务</button>
+        </form>
+      </aside>
+    </main>
+
+    <script src="/app.js?v=12"></script>
+  </body>
+</html>
