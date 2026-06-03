@@ -553,6 +553,138 @@ label {
   grid-column: 1 / -1;
 }
 
+.inline-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--soft);
+  color: var(--muted);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.inline-check input {
+  width: auto;
+}
+
+.task-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(23, 32, 38, 0.42);
+}
+
+.task-picker {
+  width: min(720px, 100%);
+  max-height: min(760px, calc(100vh - 40px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.task-picker header,
+.task-picker footer,
+.task-picker-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.task-picker h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.task-picker-actions {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+  padding-block: 12px;
+}
+
+.task-picker-actions .inline-check {
+  min-height: 38px;
+  background: #fff;
+}
+
+.task-picker-actions small {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.task-picker-list {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+  padding: 14px 20px;
+}
+
+.task-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  padding: 14px;
+}
+
+.task-choice input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.task-choice strong,
+.task-choice em,
+.task-choice small {
+  display: block;
+}
+
+.task-choice strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.task-choice em {
+  margin-top: 4px;
+  color: #24924f;
+  font-style: normal;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.task-choice small {
+  margin-top: 6px;
+  color: var(--muted);
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.task-picker footer {
+  border-top: 1px solid var(--line);
+}
+
+.task-picker footer button {
+  min-width: 140px;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -601,5 +733,20 @@ label {
 
   .file-meta {
     justify-content: flex-start;
+  }
+
+  .task-picker-backdrop {
+    padding: 10px;
+  }
+
+  .task-picker header,
+  .task-picker footer,
+  .task-picker-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .task-picker footer button {
+    width: 100%;
   }
 }
