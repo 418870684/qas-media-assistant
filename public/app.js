@@ -545,24 +545,27 @@ function buildRenamePreview(files, aiByName = state.aiByName) {
     return a.name.localeCompare(b.name, "zh-CN");
   });
 
-  return sorted.map((file, index) => {
+  let nextFallbackNumber = start;
+  return sorted.map((file) => {
     const ext = extensionOf(file.name);
-    const fallbackNumber = start + index;
+    const fallbackNumber = nextFallbackNumber;
     const localAnalysis = analyzeFileName(file.name, state.renameMode, fallbackNumber);
     const aiItem = state.aiConfig.enabled ? aiByName.get(file.name) : null;
     const analysis = aiItem ? mergeAiAnalysis(localAnalysis, aiItem) : localAnalysis;
+    if (!file.isDir && isVideoFile(file.name) && analysis.countsAsEpisode !== false) {
+      nextFallbackNumber += 1;
+    }
     const generated = file.isDir
       ? file.name
-      : aiItem?.suggestedName
-      ? aiItem.suggestedName
       : prefix
-      ? buildPreviewName(prefix, ext, analysis, pad)
+      ? buildPreviewName(prefix, ext, analysis, pad, file.name)
       : file.renamed || file.name;
     return {
       ...file,
       analysis,
       episode: analysis.number,
       episodeLabel: analysis.label,
+      fileType: analysis.fileType || "main",
       aiMediaType: aiItem?.mediaType || "",
       aiConfidence: aiItem ? aiItem.confidence : null,
       aiReason: aiItem?.reason || "",
@@ -628,15 +631,70 @@ async function fetchAiRenameItems(rawFiles) {
 }
 
 function mergeAiAnalysis(localAnalysis, aiItem) {
+  const fileType = normalizeAiFileType(aiItem.fileType || aiItem.contentType || aiItem.special || localAnalysis.fileType);
+  if (fileType !== "main") {
+    const label = aiTypeLabel(fileType) || aiItem.episodeLabel || localAnalysis.label || "待确认";
+    return {
+      ...localAnalysis,
+      mode: aiItem.mediaType || localAnalysis.mode,
+      fileType,
+      confidence: aiItem.needsConfirm || fileType === "unknown" ? "low" : "high",
+      number: null,
+      sortNumber: aiTypeSort(fileType),
+      label,
+      title: aiItem.title || aiItem.special || localAnalysis.title || label,
+      countsAsEpisode: false
+    };
+  }
   const number = Number.isFinite(Number(aiItem.number)) ? Number(aiItem.number) : localAnalysis.number;
   return {
     ...localAnalysis,
     mode: aiItem.mediaType || localAnalysis.mode,
+    fileType: "main",
     confidence: aiItem.needsConfirm ? "low" : "high",
     number,
     sortNumber: number || localAnalysis.sortNumber,
-    label: aiItem.episodeLabel || localAnalysis.label
+    label: aiItem.episodeLabel || localAnalysis.label,
+    countsAsEpisode: true
   };
+}
+
+function normalizeAiFileType(value) {
+  const text = String(value || "").toLowerCase();
+  if (["main", "episode", "正片"].includes(text) || text.includes("正片")) return "main";
+  if (["pure", "纯享"].includes(text) || text.includes("纯享")) return "pure";
+  if (["bonus", "加更"].includes(text) || text.includes("加更")) return "bonus";
+  if (["special", "特辑", "特别篇"].includes(text) || text.includes("特辑") || text.includes("特别")) return "special";
+  if (["press", "发布会"].includes(text) || text.includes("发布")) return "press";
+  if (["pilot", "先导片"].includes(text) || text.includes("先导")) return "pilot";
+  if (["extra", "花絮", "番外", "预告"].includes(text) || /花絮|番外|预告|未播|彩蛋/.test(text)) return "extra";
+  return "unknown";
+}
+
+function aiTypeLabel(type) {
+  return {
+    main: "正片",
+    pure: "纯享",
+    bonus: "加更",
+    special: "特辑",
+    press: "发布会",
+    pilot: "先导片",
+    extra: "花絮",
+    unknown: "待确认"
+  }[type] || "";
+}
+
+function aiTypeSort(type) {
+  return {
+    main: 1,
+    bonus: 91000,
+    pure: 92000,
+    special: 93000,
+    press: 94000,
+    pilot: 95000,
+    extra: 96000,
+    unknown: 99000
+  }[type] || 99000;
 }
 
 function renderPreview(files) {
@@ -678,7 +736,16 @@ function renderPreview(files) {
     });
     els.previewList.append(back);
   }
+  let lastGroup = "";
   files.forEach((file) => {
+    const group = previewGroup(file);
+    if (group !== lastGroup) {
+      const heading = document.createElement("p");
+      heading.className = "preview-group-title";
+      heading.textContent = group;
+      els.previewList.append(heading);
+      lastGroup = group;
+    }
     const row = document.createElement("article");
     row.className = `preview-row${file.isDir ? " is-dir" : ""}`;
     row.innerHTML = `
@@ -715,6 +782,13 @@ function renderPreview(files) {
   renderBreadcrumb();
 }
 
+function previewGroup(file) {
+  if (file.isDir) return "目录";
+  if (file.needsConfirm || file.fileType === "unknown") return "待确认";
+  if (file.fileType && file.fileType !== "main") return "特殊内容";
+  return "正片";
+}
+
 async function createAllDirectoryTasks() {
   const baseTask = taskFromForm();
   const missing = [];
@@ -738,6 +812,11 @@ async function createAllDirectoryTasks() {
 
   if (!selectedPlan.length) {
     addMessage("assistant", "没有选择要创建任务的视频文件。");
+    return;
+  }
+  const duplicates = duplicateTaskTargets(selectedPlan);
+  if (duplicates.length) {
+    addMessage("assistant", `发现 ${duplicates.length} 个重复目标文件名，请取消重复项后再创建：\n${duplicates.slice(0, 6).join("\n")}`);
     return;
   }
 
@@ -813,7 +892,7 @@ function selectFileTaskPlan(baseTask) {
         </header>
         <div class="task-picker-actions">
           <label class="inline-check">
-            <input type="checkbox" data-action="select-all" checked />
+            <input type="checkbox" data-action="select-all" />
             <span>全选已加载视频</span>
           </label>
           <small data-role="selected-count"></small>
@@ -964,6 +1043,21 @@ function buildPickerEntries(files, context) {
   });
 }
 
+function duplicateTaskTargets(plans) {
+  const seen = new Map();
+  const duplicates = [];
+  for (const item of plans || []) {
+    const task = item.task || {};
+    const key = `${task.savepath || ""}/${task.replace || item.name || ""}`;
+    if (seen.has(key)) {
+      duplicates.push(`${task.replace || item.name}（${task.savepath || ""}）`);
+    } else {
+      seen.set(key, item);
+    }
+  }
+  return duplicates;
+}
+
 function renderPickerNode(node, container, expanded) {
   const currentOpen = expanded.has(node.id);
   if (node.id !== "root") {
@@ -1005,7 +1099,7 @@ function renderPickerNode(node, container, expanded) {
     row.className = "task-choice file-choice";
     row.style.setProperty("--depth", item.depth);
     row.innerHTML = `
-      <input type="checkbox" data-plan-id="${escapeHtml(item.id)}" checked />
+      <input type="checkbox" data-plan-id="${escapeHtml(item.id)}" ${item.needsConfirm ? "" : "checked"} />
       <span>
         <strong>${escapeHtml(item.name)}</strong>
         <em>${escapeHtml(item.previewName)}</em>
@@ -1198,8 +1292,16 @@ function syncTaskShareUrlToPreview() {
   if (current?.shareUrl) els.shareurl.value = current.shareUrl;
 }
 
-function buildPreviewName(prefix, ext, analysis, pad) {
+function buildPreviewName(prefix, ext, analysis, pad, originalName = "") {
   if (analysis.mode === "variety") {
+    if (analysis.countsAsEpisode === false) {
+      const title = cleanPathName(analysis.title || analysis.label || stripExtension(originalName));
+      return `${prefix}-${title}${ext}`;
+    }
+    if (!Number.isFinite(Number(analysis.number))) {
+      const title = cleanPathName(stripExtension(originalName));
+      return `${prefix}-${title}${ext}`;
+    }
     return `${prefix}${analysis.label}${ext}`;
   }
   return `${prefix}${String(analysis.number).padStart(pad, "0")}${ext}`;
@@ -1244,28 +1346,45 @@ function analyzeTvFileName(name, fallbackNumber = 1) {
 
 function analyzeVarietyFileName(name, fallbackNumber = 1) {
   const text = String(name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
+  const special = detectVarietySpecial(text);
   const explicit = text.match(/第\s*0*(\d{1,4})\s*期\s*(上|中|下)?/);
-  const special = text.match(/(加更|纯享|特别篇|番外|先导片|会员版|未播|花絮|彩蛋)/);
+  if (special) {
+    return {
+      mode: "variety",
+      fileType: special.type,
+      confidence: "high",
+      number: null,
+      sortNumber: special.sortNumber,
+      label: special.label,
+      title: specialTitle(text, special.label),
+      countsAsEpisode: false
+    };
+  }
+
   if (explicit) {
     const number = Number(explicit[1]);
     const part = explicit[2] || "";
-    const tag = special?.[1] || "";
     return {
       mode: "variety",
+      fileType: "main",
       confidence: "high",
       number,
       sortNumber: number,
-      label: `第${number}期${part}${tag}`
+      label: `第${number}期${part}`,
+      countsAsEpisode: true
     };
   }
 
   if (hasDateLikeText(text)) {
     return {
       mode: "variety",
+      fileType: "unknown",
       confidence: "low",
-      number: fallbackNumber,
-      sortNumber: fallbackNumber,
-      label: `第${fallbackNumber}期`
+      number: null,
+      sortNumber: 99000 + fallbackNumber,
+      label: "待确认",
+      title: text,
+      countsAsEpisode: false
     };
   }
 
@@ -1273,27 +1392,58 @@ function analyzeVarietyFileName(name, fallbackNumber = 1) {
   if (loose) {
     const number = Number(loose[1]);
     const part = loose[2] || "";
-    const tag = special?.[1] || "";
     return {
       mode: "variety",
+      fileType: "main",
       confidence: "medium",
       number,
       sortNumber: number,
-      label: `第${number}期${part}${tag}`
+      label: `第${number}期${part}`,
+      countsAsEpisode: true
     };
   }
 
   return {
     mode: "variety",
+    fileType: "unknown",
     confidence: "low",
-    number: fallbackNumber,
-    sortNumber: fallbackNumber,
-    label: special?.[1] || `第${fallbackNumber}期`
+    number: null,
+    sortNumber: 99000 + fallbackNumber,
+    label: "待确认",
+    title: text,
+    countsAsEpisode: false
   };
 }
 
+function detectVarietySpecial(text) {
+  const rules = [
+    { type: "bonus", label: "加更", sortNumber: 91000, pattern: /加更|加长版|会员加更/ },
+    { type: "pure", label: "纯享", sortNumber: 92000, pattern: /纯享|纯享版|舞台纯享/ },
+    { type: "special", label: "特辑", sortNumber: 93000, pattern: /特辑|特别篇|精编|合集|回顾/ },
+    { type: "press", label: "发布会", sortNumber: 94000, pattern: /发布会|见面会|直播|首映礼/ },
+    { type: "pilot", label: "先导片", sortNumber: 95000, pattern: /先导片|先导|超前企划/ },
+    { type: "extra", label: "花絮", sortNumber: 96000, pattern: /花絮|番外|未播|彩蛋|幕后|会员版|预告/ }
+  ];
+  return rules.find((rule) => rule.pattern.test(String(text || ""))) || null;
+}
+
+function specialTitle(text, label) {
+  const original = String(text || "").trim();
+  let cleaned = original
+    .replace(/(?:19|20)\d{2}[._-]?(?:1[0-2]|0?[1-9])[._-]?(?:3[01]|[12]\d|0?[1-9])/g, "")
+    .replace(/^[\s._-]+|[\s._-]+$/g, "")
+    .trim();
+  if ((cleaned.startsWith("(") && cleaned.endsWith(")")) || (cleaned.startsWith("（") && cleaned.endsWith("）"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  const genericTitles = new Set([label, `${label}版`, "纯享版", "发布会", "特辑", "加更", "花絮", "先导片"]);
+  if (genericTitles.has(cleaned) && original !== cleaned) return original;
+  if (!cleaned) return label;
+  return cleaned.includes(label) ? cleaned : `${label}-${cleaned}`;
+}
+
 function hasDateLikeText(text) {
-  return /(?:19|20)\d{2}[._-](?:0?[1-9]|1[0-2])[._-](?:0?[1-9]|[12]\d|3[01])/.test(String(text || ""));
+  return /(?:19|20)\d{2}[._-]?(?:1[0-2]|0?[1-9])[._-]?(?:3[01]|[12]\d|0?[1-9])/.test(String(text || ""));
 }
 
 function episodeNumber(name) {

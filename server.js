@@ -432,9 +432,7 @@ async function aiRenamePreview(input = {}) {
     .slice(0, 80)
     .map((file) => ({
       name: String(file.name || ""),
-      size: file.size || "",
-      localLabel: file.episodeLabel || file.analysis?.label || "",
-      localConfidence: file.analysis?.confidence || ""
+      size: file.size || ""
     }))
     .filter((file) => file.name);
 
@@ -446,15 +444,16 @@ async function aiRenamePreview(input = {}) {
   const threshold = clampConfidence(input.confidenceThreshold ?? config.confidenceThreshold);
   const prompt = [
     "你是影视文件命名识别助手，只返回严格 JSON。",
-    "任务：判断这些文件属于电视剧还是综艺，并给出适合媒体库刮削的集数/期数标签。",
+    "任务：先判断文件类型，再判断是否需要期数。不要直接生成最终文件名。",
     "重要规则：",
     "1. 综艺中 2026.05.20、20260604、2026-06-03 这类日期不能直接当作期数，除非文件名同时明确写了第几期。",
-    "2. 能识别上/中/下、加更、纯享、特别篇、番外、先导片、花絮、会员版。",
-    "3. 不确定时 confidence 必须低于阈值，并 needsConfirm=true。",
-    "4. suggestedName 要保留原扩展名。",
+    "2. 综艺的纯享、加更、特辑、发布会、先导片、花絮、预告、番外、未播都不是正片，不参与期数递增。",
+    "3. 只有正片才允许 fileType=main 且 number 有值；特殊内容 number 必须是 null。",
+    "4. 不确定时 fileType=unknown，confidence 必须低于阈值，并 needsConfirm=true。",
     "5. mediaType 只能是 tv、variety、unknown。",
+    "6. fileType 只能是 main、pure、bonus、special、press、pilot、extra、unknown。",
     "输出格式：",
-    "{\"mediaType\":\"variety\",\"confidence\":0.9,\"items\":[{\"originalName\":\"原文件名.mp4\",\"mediaType\":\"variety\",\"episodeLabel\":\"第2期上\",\"number\":2,\"part\":\"上\",\"special\":\"\",\"suggestedName\":\"节目名第2期上.mp4\",\"confidence\":0.92,\"needsConfirm\":false,\"reason\":\"理由\"}]}",
+    "{\"mediaType\":\"variety\",\"confidence\":0.9,\"items\":[{\"originalName\":\"原文件名.mp4\",\"mediaType\":\"variety\",\"fileType\":\"pure\",\"episodeLabel\":\"纯享\",\"number\":null,\"part\":\"\",\"special\":\"撕名牌游戏纯享\",\"title\":\"撕名牌游戏纯享\",\"confidence\":0.92,\"needsConfirm\":false,\"reason\":\"文件名包含纯享，不属于正片\"}]}",
     "",
     JSON.stringify({
       taskname,
@@ -845,19 +844,34 @@ function normalizeAiRenameItems(items, inputFiles, threshold) {
       const confidence = clampConfidence(item.confidence);
       const originalName = String(item.originalName || item.name || "");
       const suggestedName = String(item.suggestedName || originalName).trim() || originalName;
+      const fileType = normalizeAiFileType(item.fileType || item.contentType || item.special || "");
       return {
         originalName,
         mediaType: normalizeAiMediaType(item.mediaType),
+        fileType,
         episodeLabel: String(item.episodeLabel || "").trim(),
-        number: Number.isFinite(Number(item.number)) ? Number(item.number) : null,
+        number: fileType === "main" && Number.isFinite(Number(item.number)) ? Number(item.number) : null,
         part: String(item.part || "").trim(),
         special: String(item.special || "").trim(),
+        title: String(item.title || item.special || "").trim(),
         suggestedName,
         confidence,
-        needsConfirm: Boolean(item.needsConfirm) || confidence < threshold,
+        needsConfirm: Boolean(item.needsConfirm) || fileType === "unknown" || confidence < threshold,
         reason: String(item.reason || "").slice(0, 300)
       };
     });
+}
+
+function normalizeAiFileType(value) {
+  const text = String(value || "").toLowerCase();
+  if (text === "main" || text === "episode" || text.includes("正片")) return "main";
+  if (text === "pure" || text.includes("纯享")) return "pure";
+  if (text === "bonus" || text.includes("加更")) return "bonus";
+  if (text === "special" || text.includes("特辑") || text.includes("特别")) return "special";
+  if (text === "press" || text.includes("发布")) return "press";
+  if (text === "pilot" || text.includes("先导")) return "pilot";
+  if (text === "extra" || /花絮|番外|预告|未播|彩蛋/.test(text)) return "extra";
+  return "unknown";
 }
 
 function normalizeAiMediaType(value) {
