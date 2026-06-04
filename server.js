@@ -10,6 +10,11 @@ const aiConfigPath = path.join(__dirname, "ai-config.json");
 
 loadDotEnv(path.join(__dirname, ".env"));
 const savedAiConfig = loadAiConfig();
+const envSet = {
+  aiEnabled: hasEnv("AI_ENABLED"),
+  aiTimeoutMs: hasEnv("AI_TIMEOUT_MS"),
+  aiConfidenceThreshold: hasEnv("AI_CONFIDENCE_THRESHOLD")
+};
 
 const env = {
   port: numberEnv("PORT", 8787),
@@ -742,13 +747,15 @@ function assistantMessage(message) {
 
 function aiConfig(override = {}) {
   const saved = savedAiConfig || {};
-  const baseUrl = trimSlash(String(override.baseUrl || saved.baseUrl || env.openaiBaseUrl || ""));
-  const model = String(override.model || saved.model || env.openaiModel || "").trim();
-  const apiKey = String(override.apiKey || saved.apiKey || env.openaiApiKey || "").trim();
+  const baseUrl = trimSlash(String(override.baseUrl || env.openaiBaseUrl || saved.baseUrl || ""));
+  const model = String(override.model || env.openaiModel || saved.model || "").trim();
+  const apiKey = String(override.apiKey || env.openaiApiKey || saved.apiKey || "").trim();
   const enabled =
     typeof override.enabled === "boolean"
       ? override.enabled
-      : typeof saved.enabled === "boolean"
+      : envSet.aiEnabled
+        ? env.aiEnabled
+        : typeof saved.enabled === "boolean"
         ? saved.enabled
         : env.aiEnabled;
   return {
@@ -756,8 +763,12 @@ function aiConfig(override = {}) {
     baseUrl,
     model,
     apiKey,
-    timeoutMs: Math.max(3000, Number(override.timeoutMs || saved.timeoutMs || env.aiTimeoutMs || 20000)),
-    confidenceThreshold: clampConfidence(override.confidenceThreshold ?? saved.confidenceThreshold ?? env.aiConfidenceThreshold)
+    timeoutMs: Math.max(3000, Number(override.timeoutMs || (envSet.aiTimeoutMs ? env.aiTimeoutMs : saved.timeoutMs) || 20000)),
+    confidenceThreshold: clampConfidence(
+      override.confidenceThreshold ??
+        (envSet.aiConfidenceThreshold ? env.aiConfidenceThreshold : saved.confidenceThreshold) ??
+        env.aiConfidenceThreshold
+    )
   };
 }
 
@@ -934,6 +945,10 @@ function safeJson(text) {
 
 function trimSlash(value) {
   return String(value || "").replace(/\/+$/, "");
+}
+
+function hasEnv(key) {
+  return Object.prototype.hasOwnProperty.call(process.env, key);
 }
 
 function numberEnv(key, fallback) {
