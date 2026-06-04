@@ -195,7 +195,8 @@ function handleChatResponse(data) {
   }
   if (data.type === "draft") {
     fillTask(data.draft);
-    switchView("create");
+    switchView("preview");
+    loadSharePreview({ name: "顶层", shareUrl: data.draft.shareurl, mode: "reset" });
   }
   if (data.type === "tasks") {
     state.qasTasks = data.tasks || [];
