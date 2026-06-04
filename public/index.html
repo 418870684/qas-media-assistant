@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>QAS Media Assistant</title>
-    <link rel="stylesheet" href="/styles.css?v=18" />
+    <link rel="stylesheet" href="/styles.css?v=22" />
   </head>
   <body class="auth-loading">
     <section class="login-shell" id="loginShell" aria-label="登录">
@@ -110,6 +110,10 @@
             </label>
           </div>
           <div class="rename-tools">
+            <div class="mode-switch" id="renameModeSwitch" role="radiogroup" aria-label="命名模式">
+              <button class="active" type="button" data-rename-mode="tv">电视剧</button>
+              <button type="button" data-rename-mode="variety">综艺</button>
+            </div>
             <div class="grid-three">
               <label>
                 <span>命名前缀</span>
@@ -157,6 +161,6 @@
       </section>
     </main>
 
-    <script src="/app.js?v=18"></script>
+    <script src="/app.js?v=22"></script>
   </body>
 </html>

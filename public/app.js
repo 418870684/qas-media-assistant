@@ -4,9 +4,11 @@ const state = {
   candidatePage: 1,
   candidatePageSize: 5,
   currentView: "search",
+  renameMode: "tv",
   renamePrefixTouched: false,
   qasTasks: [],
   previewPath: [],
+  lastPreviewRawFiles: [],
   lastPreviewFiles: []
 };
 
@@ -27,6 +29,7 @@ const els = {
   replace: document.querySelector("#replace"),
   runNow: document.querySelector("#runNow"),
   renamePrefix: document.querySelector("#renamePrefix"),
+  renameModeSwitch: document.querySelector("#renameModeSwitch"),
   renameStart: document.querySelector("#renameStart"),
   renamePad: document.querySelector("#renamePad"),
   applyRename: document.querySelector("#applyRename"),
@@ -117,12 +120,24 @@ els.applyRename.addEventListener("click", () => {
 els.previewShare.addEventListener("click", previewShare);
 els.createAllDirs.addEventListener("click", createAllDirectoryTasks);
 els.cleanupMatchingTasks.addEventListener("click", cleanupCurrentTaskFamily);
+els.renameModeSwitch.addEventListener("click", (event) => {
+  const mode = event.target.dataset.renameMode;
+  if (!mode) return;
+  state.renameMode = mode;
+  els.renameModeSwitch.querySelectorAll("[data-rename-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.renameMode === mode);
+  });
+  rerenderCurrentPreview();
+});
 els.renamePrefix.addEventListener("input", () => {
   state.renamePrefixTouched = true;
+  rerenderCurrentPreview();
 });
 els.taskname.addEventListener("input", () => {
   syncAutoRenamePrefix();
 });
+els.renameStart.addEventListener("input", rerenderCurrentPreview);
+els.renamePad.addEventListener("input", rerenderCurrentPreview);
 els.reloadQasTasks.addEventListener("click", () => loadTasks({ silent: true }));
 els.filterCurrentTask.addEventListener("click", () => {
   els.taskFilter.value = taskFromForm().taskname;
@@ -327,6 +342,7 @@ function fillTask(task) {
 function syncAutoRenamePrefix(force = false) {
   if (state.renamePrefixTouched && !force) return;
   els.renamePrefix.value = deriveRenamePrefix(els.taskname.value);
+  rerenderCurrentPreview();
 }
 
 function deriveRenamePrefix(taskname) {
@@ -352,9 +368,14 @@ function taskFromForm() {
 function applyRenameRule() {
   const prefix = els.renamePrefix.value.trim() || els.taskname.value.trim() || "剧名";
 
-  els.pattern.value = ".*?(?:S\\d{1,2}E|EP|第)?0*(\\d{1,4})(?:集|话)?.*?\\.(mp4|mkv|avi|mov|wmv|flv|ts|m2ts)$";
-  els.replace.value = `${prefix}\\1.\\2`;
-  addMessage("assistant", "已生成 QAS 正则命名规则：会读取原文件名里的集数。位数设置只用于页面预览，QAS 实际改名按替换规则执行。");
+  if (state.renameMode === "variety") {
+    els.pattern.value = ".*?(第\\s*\\d{1,4}\\s*期(?:上|中|下)?|加更|纯享|特别篇|番外|先导片).*?\\.(mp4|mkv|avi|mov|wmv|flv|ts|m2ts)$";
+    els.replace.value = `${prefix}\\1.\\2`;
+  } else {
+    els.pattern.value = ".*?(?:S\\d{1,2}E|EP|第)?0*(\\d{1,4})(?:集|话)?.*?\\.(mp4|mkv|avi|mov|wmv|flv|ts|m2ts)$";
+    els.replace.value = `${prefix}\\1.\\2`;
+  }
+  addMessage("assistant", "已按当前命名模式生成 QAS 正则规则。文件级创建时会优先使用每个文件的精确匹配规则。");
 }
 
 async function previewShare() {
@@ -406,7 +427,8 @@ async function loadSharePreview({ name = "顶层", shareUrl, mode = "reset" }) {
     return;
   }
 
-  const files = buildRenamePreview(result.data || []);
+  state.lastPreviewRawFiles = result.data || [];
+  const files = buildRenamePreview(state.lastPreviewRawFiles);
   state.lastPreviewFiles = files;
   renderPreview(files);
   switchView("preview");
@@ -417,27 +439,38 @@ function buildRenamePreview(files) {
   const start = Math.max(0, Number(els.renameStart.value || 1));
   const pad = Math.max(1, Number(els.renamePad.value || 3));
   const sorted = [...files].sort((a, b) => {
-    const ea = episodeNumber(a.name);
-    const eb = episodeNumber(b.name);
-    if (ea !== eb) return ea - eb;
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    const ea = analyzeFileName(a.name, state.renameMode, 99999);
+    const eb = analyzeFileName(b.name, state.renameMode, 99999);
+    if (ea.sortNumber !== eb.sortNumber) return ea.sortNumber - eb.sortNumber;
     return a.name.localeCompare(b.name, "zh-CN");
   });
 
   return sorted.map((file, index) => {
     const ext = extensionOf(file.name);
-    const episode = episodeNumber(file.name);
-    const number = episode === 99999 ? start + index : episode;
+    const fallbackNumber = start + index;
+    const analysis = analyzeFileName(file.name, state.renameMode, fallbackNumber);
     const generated = file.isDir
       ? file.name
       : prefix
-      ? `${prefix}${String(number).padStart(pad, "0")}${ext}`
+      ? buildPreviewName(prefix, ext, analysis, pad)
       : file.renamed || file.name;
     return {
       ...file,
-      episode: number,
+      analysis,
+      episode: analysis.number,
+      episodeLabel: analysis.label,
+      needsConfirm: analysis.confidence !== "high",
       previewName: generated
     };
   });
+}
+
+function rerenderCurrentPreview() {
+  if (!state.lastPreviewRawFiles.length) return;
+  const files = buildRenamePreview(state.lastPreviewRawFiles);
+  state.lastPreviewFiles = files;
+  renderPreview(files);
 }
 
 function renderPreview(files) {
@@ -488,7 +521,8 @@ function renderPreview(files) {
         <p class="to">${escapeHtml(file.isDir ? "进入目录查看文件" : file.previewName || file.renamed || file.name)}</p>
       </div>
       <div class="file-meta">
-        ${file.isDir ? '<span class="pill blue">目录</span>' : `<span class="pill blue">第 ${escapeHtml(file.episode)} 集</span>`}
+        ${file.isDir ? '<span class="pill blue">目录</span>' : `<span class="pill blue">${escapeHtml(file.episodeLabel || `第 ${file.episode} 集`)}</span>`}
+        ${!file.isDir && file.needsConfirm ? '<span class="pill orange">待确认</span>' : ""}
         ${file.isDir ? "" : `<span class="pill green">${escapeHtml(formatSize(file.size))}</span>`}
       </div>
       ${file.isDir ? '<button class="enter-dir" type="button">进入目录</button>' : ""}
@@ -529,18 +563,13 @@ async function createAllDirectoryTasks() {
   }
 
   els.createAllDirs.disabled = true;
-  els.createAllDirs.textContent = "扫描中";
-  const plan = await buildOneLevelTaskPlan(baseTask);
+  els.createAllDirs.textContent = "选择中";
+  const selectedPlan = await selectFileTaskPlan(baseTask);
   els.createAllDirs.disabled = false;
   els.createAllDirs.textContent = "选择目录任务";
 
-  if (!plan.length) {
-    addMessage("assistant", "当前目录和下一级目录里没有找到可转存的视频文件。");
-    return;
-  }
-  const selectedPlan = await selectDirectoryTaskPlan(plan);
   if (!selectedPlan.length) {
-    addMessage("assistant", "没有选择要创建的目录任务。");
+    addMessage("assistant", "没有选择要创建任务的视频文件。");
     return;
   }
 
@@ -548,7 +577,7 @@ async function createAllDirectoryTasks() {
   els.createAllDirs.textContent = "创建中";
   let cleanupText = "";
   if (els.cleanupBeforeCreate.checked) {
-    const cleanup = await deleteQasTasksByNames(selectedPlan.map((item) => item.task.taskname));
+    const cleanup = await deleteQasTaskFamily(baseTask.taskname);
     cleanupText = cleanup.success && cleanup.data?.removedCount
       ? `已清理 ${cleanup.data.removedCount} 个同名旧任务。`
       : "";
@@ -575,94 +604,53 @@ async function createAllDirectoryTasks() {
   const failedText = failed.length
     ? `\n失败：\n${failed.map(({ item, result }) => `- ${item.name}：${result.message || "QAS 没有返回明确原因"}`).join("\n")}`
     : "";
-  addMessage("assistant", `${cleanupText}已创建 ${successCount} / ${results.length} 个目录任务。${failedText}`);
+  addMessage("assistant", `${cleanupText}已创建 ${successCount} / ${results.length} 个文件任务。${failedText}`);
   switchView("tasks");
   els.taskFilter.value = baseTask.taskname;
   await loadTasks({ silent: true });
 }
 
-async function buildOneLevelTaskPlan(baseTask) {
-  const plan = [];
-  const currentVideos = state.lastPreviewFiles.filter((file) => !file.isDir && isVideoFile(file.name));
-  if (currentVideos.length) {
-    plan.push({
-      name: currentPreviewName(),
-      videoCount: currentVideos.length,
-      savepath: baseTask.savepath,
-      shareurl: baseTask.shareurl,
-      task: { ...baseTask }
-    });
-  }
-
-  const dirs = state.lastPreviewFiles.filter((file) => file.isDir && file.childShareUrl);
-  for (const dir of dirs) {
-    const dirTask = {
-      ...baseTask,
-      taskname: `${baseTask.taskname} ${dir.name}`.trim(),
-      shareurl: dir.childShareUrl,
-      savepath: joinSavePath(baseTask.savepath, cleanPathName(dir.name))
-    };
-    const result = await api("/api/share-detail", {
-      method: "POST",
-      body: JSON.stringify({ shareurl: dir.childShareUrl, task: dirTask })
-    });
-    if (!result.success) {
-      plan.push({
-        name: dir.name,
-        videoCount: 0,
-        savepath: dirTask.savepath,
-        shareurl: dirTask.shareurl,
-        error: result.message || "读取目录失败",
-        task: dirTask
-      });
-      continue;
-    }
-    const videos = (result.data || []).filter((file) => !file.isDir && isVideoFile(file.name));
-    if (videos.length) {
-      plan.push({
-        name: dir.name,
-        videoCount: videos.length,
-        savepath: dirTask.savepath,
-        shareurl: dirTask.shareurl,
-        task: dirTask
-      });
-    }
-  }
-  return plan.filter((item) => item.videoCount > 0);
-}
-
-function selectDirectoryTaskPlan(plan) {
+function selectFileTaskPlan(baseTask) {
   return new Promise((resolve) => {
     const overlay = document.createElement("section");
     overlay.className = "task-picker-backdrop";
+    const rootShareUrl = currentPreviewShareUrl() || baseTask.shareurl;
+    const rootNode = {
+      id: "root",
+      name: currentPreviewName(),
+      shareurl: rootShareUrl,
+      savepath: baseTask.savepath,
+      taskSuffix: "",
+      depth: 0,
+      loaded: true,
+      loading: false,
+      files: buildPickerEntries(state.lastPreviewRawFiles.length ? state.lastPreviewRawFiles : state.lastPreviewFiles, {
+        baseTask,
+        shareurl: rootShareUrl,
+        savepath: baseTask.savepath,
+        taskSuffix: "",
+        depth: 0
+      })
+    };
+    const expanded = new Set(["root"]);
+
     overlay.innerHTML = `
       <div class="task-picker" role="dialog" aria-modal="true" aria-label="选择目录任务">
         <header>
           <div>
             <p class="eyebrow">QAS TASK PICKER</p>
-            <h2>选择要保存的目录</h2>
+            <h2>选择要保存的视频文件</h2>
           </div>
           <button class="ghost" type="button" data-action="cancel">取消</button>
         </header>
         <div class="task-picker-actions">
           <label class="inline-check">
             <input type="checkbox" data-action="select-all" checked />
-            <span>全选</span>
+            <span>全选已加载视频</span>
           </label>
           <small data-role="selected-count"></small>
         </div>
-        <div class="task-picker-list">
-          ${plan.map((item, index) => `
-            <label class="task-choice">
-              <input type="checkbox" data-index="${index}" checked />
-              <span>
-                <strong>${escapeHtml(item.name)}</strong>
-                <em>${escapeHtml(item.videoCount)} 个视频</em>
-                <small>${escapeHtml(item.savepath)}</small>
-              </span>
-            </label>
-          `).join("")}
-        </div>
+        <div class="task-picker-list" data-role="tree"></div>
         <footer>
           <button type="button" data-action="cancel">取消</button>
           <button class="primary" type="button" data-action="confirm">创建选中任务</button>
@@ -670,7 +658,8 @@ function selectDirectoryTaskPlan(plan) {
       </div>
     `;
 
-    const checkboxes = () => [...overlay.querySelectorAll("input[data-index]")];
+    const tree = overlay.querySelector("[data-role='tree']");
+    const checkboxes = () => [...overlay.querySelectorAll("input[data-plan-id]")];
     const selectedCount = overlay.querySelector("[data-role='selected-count']");
     const confirmButton = overlay.querySelector("[data-action='confirm']");
     const selectAll = overlay.querySelector("[data-action='select-all']");
@@ -681,10 +670,15 @@ function selectDirectoryTaskPlan(plan) {
     const updateCount = () => {
       const total = checkboxes().length;
       const selected = checkboxes().filter((input) => input.checked).length;
-      selectedCount.textContent = `已选 ${selected} / ${total}`;
+      selectedCount.textContent = total ? `已选 ${selected} / ${total}` : "当前没有已加载的视频";
       confirmButton.disabled = selected === 0;
-      selectAll.checked = selected === total;
+      selectAll.checked = total > 0 && selected === total;
       selectAll.indeterminate = selected > 0 && selected < total;
+    };
+    const render = () => {
+      tree.innerHTML = "";
+      renderPickerNode(rootNode, tree, expanded);
+      updateCount();
     };
 
     overlay.addEventListener("change", (event) => {
@@ -695,20 +689,183 @@ function selectDirectoryTaskPlan(plan) {
       }
       updateCount();
     });
-    overlay.addEventListener("click", (event) => {
+    overlay.addEventListener("click", async (event) => {
       if (event.target.dataset.action === "cancel") close([]);
+      if (event.target.dataset.action === "toggle-dir") {
+        const id = event.target.dataset.nodeId;
+        const node = findPickerNode(rootNode, id);
+        if (!node) return;
+        if (expanded.has(id)) {
+          expanded.delete(id);
+          render();
+          return;
+        }
+        expanded.add(id);
+        if (!node.loaded && !node.loading) {
+          node.loading = true;
+          render();
+          const result = await api("/api/share-detail", {
+            method: "POST",
+            body: JSON.stringify({
+              shareurl: node.shareurl,
+              task: { ...baseTask, shareurl: node.shareurl, savepath: node.savepath }
+            })
+          });
+          node.loading = false;
+          node.loaded = true;
+          if (result.success) {
+            node.files = buildPickerEntries(result.data || [], {
+              baseTask,
+              shareurl: node.shareurl,
+              savepath: node.savepath,
+              taskSuffix: node.taskSuffix,
+              depth: node.depth
+            });
+          } else {
+            node.error = result.message || "读取目录失败";
+          }
+        }
+        render();
+      }
       if (event.target.dataset.action === "confirm") {
         const selected = checkboxes()
           .filter((input) => input.checked)
-          .map((input) => plan[Number(input.dataset.index)])
+          .map((input) => findPickerPlan(rootNode, input.dataset.planId))
           .filter(Boolean);
         close(selected);
       }
     });
 
     document.body.append(overlay);
-    updateCount();
+    render();
   });
+}
+
+function buildPickerEntries(files, context) {
+  const preview = buildRenamePreview(files || []);
+  return preview.map((file, index) => {
+    const id = `${context.shareurl || "share"}::${context.depth}:${index}:${file.name}`;
+    if (file.isDir) {
+      return {
+        type: "dir",
+        id,
+        name: file.name,
+        shareurl: file.childShareUrl,
+        savepath: joinSavePath(context.savepath, cleanPathName(file.name)),
+        taskSuffix: joinTaskSuffix(context.taskSuffix, cleanPathName(file.name)),
+        depth: context.depth + 1,
+        loaded: false,
+        loading: false,
+        files: []
+      };
+    }
+    if (!isVideoFile(file.name)) {
+      return {
+        type: "other",
+        id,
+        name: file.name,
+        depth: context.depth + 1
+      };
+    }
+    const previewName = file.previewName || file.renamed || file.name;
+    const taskFileName = taskFileLabel(previewName);
+    return {
+      type: "file",
+      id,
+      name: file.name,
+      previewName,
+      size: file.size,
+      label: file.episodeLabel,
+      needsConfirm: file.needsConfirm,
+      depth: context.depth + 1,
+      plan: {
+        id,
+        name: file.name,
+        task: {
+          ...context.baseTask,
+          taskname: `${context.baseTask.taskname} ${context.taskSuffix || ""} ${taskFileName}`.replace(/\s+/g, " ").trim(),
+          shareurl: context.shareurl,
+          savepath: context.savepath,
+          pattern: `^${escapeRegex(file.name)}$`,
+          replace: previewName
+        }
+      }
+    };
+  });
+}
+
+function renderPickerNode(node, container, expanded) {
+  const currentOpen = expanded.has(node.id);
+  if (node.id !== "root") {
+    const row = document.createElement("div");
+    row.className = "picker-dir-row";
+    row.style.setProperty("--depth", node.depth);
+    row.innerHTML = `
+      <button type="button" data-action="toggle-dir" data-node-id="${escapeHtml(node.id)}">${currentOpen ? "收起" : "展开"}</button>
+      <strong>${escapeHtml(node.name)}</strong>
+      <small>${escapeHtml(node.savepath || "")}</small>
+    `;
+    container.append(row);
+  }
+
+  if (!currentOpen) return;
+  if (node.loading) {
+    const row = document.createElement("p");
+    row.className = "picker-note";
+    row.style.setProperty("--depth", node.depth + 1);
+    row.textContent = "正在读取目录...";
+    container.append(row);
+    return;
+  }
+  if (node.error) {
+    const row = document.createElement("p");
+    row.className = "picker-note error";
+    row.style.setProperty("--depth", node.depth + 1);
+    row.textContent = node.error;
+    container.append(row);
+    return;
+  }
+  node.files.forEach((item) => {
+    if (item.type === "dir" && item.shareurl) {
+      renderPickerNode(item, container, expanded);
+      return;
+    }
+    if (item.type !== "file") return;
+    const row = document.createElement("label");
+    row.className = "task-choice file-choice";
+    row.style.setProperty("--depth", item.depth);
+    row.innerHTML = `
+      <input type="checkbox" data-plan-id="${escapeHtml(item.id)}" checked />
+      <span>
+        <strong>${escapeHtml(item.name)}</strong>
+        <em>${escapeHtml(item.previewName)}</em>
+        <small>${escapeHtml(item.label || "")}${item.needsConfirm ? " · 待确认" : ""} · ${escapeHtml(formatSize(item.size))}</small>
+      </span>
+    `;
+    container.append(row);
+  });
+}
+
+function findPickerNode(node, id) {
+  if (node.id === id) return node;
+  for (const item of node.files || []) {
+    if (item.type === "dir") {
+      const found = findPickerNode(item, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function findPickerPlan(node, id) {
+  for (const item of node.files || []) {
+    if (item.type === "file" && item.id === id) return item.plan;
+    if (item.type === "dir") {
+      const found = findPickerPlan(item, id);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 async function cleanupCurrentTaskFamily() {
@@ -766,6 +923,18 @@ async function deleteQasTasksByNames(tasknames) {
   });
 }
 
+async function deleteQasTaskFamily(baseName) {
+  const data = await api("/api/qas/tasks", { method: "GET" });
+  if (!data.success) return data;
+  const names = [...new Set((data.data || [])
+    .map((task) => String(task.taskname || "").trim())
+    .filter((name) => isSameTaskFamilyName(name, baseName)))];
+  if (!names.length) {
+    return { success: true, message: "没有找到同名旧任务。", data: { removedCount: 0 } };
+  }
+  return deleteQasTasksByNames(names);
+}
+
 function isSameTaskFamilyName(name, baseName) {
   const current = String(name || "").trim();
   const base = String(baseName || "").trim();
@@ -777,10 +946,22 @@ function currentPreviewName() {
   return current?.name || "当前目录";
 }
 
+function currentPreviewShareUrl() {
+  const current = state.previewPath[state.previewPath.length - 1];
+  return current?.shareUrl || "";
+}
+
 function joinSavePath(base, name) {
   const left = String(base || "").replace(/\/+$/, "");
   const right = String(name || "").replace(/^\/+/, "");
   return right ? `${left}/${right}` : left;
+}
+
+function joinTaskSuffix(base, name) {
+  return [base, name]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .join(" ");
 }
 
 function previewStats(files) {
@@ -847,6 +1028,104 @@ function syncTaskShareUrlToPreview() {
   if (current?.shareUrl) els.shareurl.value = current.shareUrl;
 }
 
+function buildPreviewName(prefix, ext, analysis, pad) {
+  if (analysis.mode === "variety") {
+    return `${prefix}${analysis.label}${ext}`;
+  }
+  return `${prefix}${String(analysis.number).padStart(pad, "0")}${ext}`;
+}
+
+function analyzeFileName(name, mode = "tv", fallbackNumber = 1) {
+  return mode === "variety"
+    ? analyzeVarietyFileName(name, fallbackNumber)
+    : analyzeTvFileName(name, fallbackNumber);
+}
+
+function analyzeTvFileName(name, fallbackNumber = 1) {
+  const text = String(name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
+  const patterns = [
+    /S\d{1,2}E\s*0*(\d{1,4})/i,
+    /(?:^|[\s._-])EP\s*0*(\d{1,4})(?=\D|$)/i,
+    /(?:^|[\s._-])E\s*0*(\d{1,4})(?=\D|$)/i,
+    /第\s*0*(\d{1,4})\s*[集话]/,
+    /^\s*0*(\d{1,4})(?=\D|$)/
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const number = Number(match[1]);
+      return {
+        mode: "tv",
+        confidence: "high",
+        number,
+        sortNumber: number,
+        label: `第 ${number} 集`
+      };
+    }
+  }
+  return {
+    mode: "tv",
+    confidence: "low",
+    number: fallbackNumber,
+    sortNumber: fallbackNumber,
+    label: `第 ${fallbackNumber} 集`
+  };
+}
+
+function analyzeVarietyFileName(name, fallbackNumber = 1) {
+  const text = String(name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
+  const explicit = text.match(/第\s*0*(\d{1,4})\s*期\s*(上|中|下)?/);
+  const special = text.match(/(加更|纯享|特别篇|番外|先导片|会员版|未播|花絮|彩蛋)/);
+  if (explicit) {
+    const number = Number(explicit[1]);
+    const part = explicit[2] || "";
+    const tag = special?.[1] || "";
+    return {
+      mode: "variety",
+      confidence: "high",
+      number,
+      sortNumber: number,
+      label: `第${number}期${part}${tag}`
+    };
+  }
+
+  if (hasDateLikeText(text)) {
+    return {
+      mode: "variety",
+      confidence: "low",
+      number: fallbackNumber,
+      sortNumber: fallbackNumber,
+      label: `第${fallbackNumber}期`
+    };
+  }
+
+  const loose = text.match(/(?:^|[^\d])0*(\d{1,3})\s*(上|中|下)?(?=\D*$)/);
+  if (loose) {
+    const number = Number(loose[1]);
+    const part = loose[2] || "";
+    const tag = special?.[1] || "";
+    return {
+      mode: "variety",
+      confidence: "medium",
+      number,
+      sortNumber: number,
+      label: `第${number}期${part}${tag}`
+    };
+  }
+
+  return {
+    mode: "variety",
+    confidence: "low",
+    number: fallbackNumber,
+    sortNumber: fallbackNumber,
+    label: special?.[1] || `第${fallbackNumber}期`
+  };
+}
+
+function hasDateLikeText(text) {
+  return /(?:19|20)\d{2}[._-](?:0?[1-9]|1[0-2])[._-](?:0?[1-9]|[12]\d|3[01])/.test(String(text || ""));
+}
+
 function episodeNumber(name) {
   const text = String(name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
   const leading = text.match(/^\s*0*(\d{1,4})(?=\D|$)/);
@@ -869,6 +1148,23 @@ function episodeNumber(name) {
 function extensionOf(name) {
   const match = String(name || "").match(/(\.[A-Za-z0-9]{2,5})$/);
   return match ? match[1] : "";
+}
+
+function stripExtension(name) {
+  return String(name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
+}
+
+function taskFileLabel(name) {
+  const label = stripExtension(name);
+  const prefix = els.renamePrefix.value.trim();
+  if (prefix && label.startsWith(prefix) && label.length > prefix.length) {
+    return label.slice(prefix.length).trim();
+  }
+  return label;
+}
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function shareBase(value) {
