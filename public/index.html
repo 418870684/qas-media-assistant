@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>QAS Media Assistant</title>
-    <link rel="stylesheet" href="/styles.css?v=22" />
+    <link rel="stylesheet" href="/styles.css?v=23" />
   </head>
   <body class="auth-loading">
     <section class="login-shell" id="loginShell" aria-label="登录">
@@ -114,6 +114,39 @@
               <button class="active" type="button" data-rename-mode="tv">电视剧</button>
               <button type="button" data-rename-mode="variety">综艺</button>
             </div>
+            <div class="ai-tools">
+              <div class="ai-head">
+                <label class="toggle">
+                  <input id="aiEnabled" type="checkbox" />
+                  <span>AI 识别</span>
+                </label>
+                <small id="aiStatus">未配置</small>
+              </div>
+              <div class="grid-two">
+                <label>
+                  <span>API 地址</span>
+                  <input id="aiBaseUrl" placeholder="https://api.openai.com/v1" />
+                </label>
+                <label>
+                  <span>模型</span>
+                  <input id="aiModel" placeholder="gpt-4o-mini" />
+                </label>
+              </div>
+              <div class="grid-two">
+                <label>
+                  <span>API Key</span>
+                  <input id="aiApiKey" type="password" autocomplete="off" placeholder="留空则沿用已保存 Key" />
+                </label>
+                <label>
+                  <span>置信度阈值</span>
+                  <input id="aiConfidenceThreshold" type="number" min="0" max="1" step="0.05" value="0.75" />
+                </label>
+              </div>
+              <div class="tool-row">
+                <button id="saveAiConfig" type="button">保存 AI 配置</button>
+                <button id="testAiConfig" type="button">测试连接</button>
+              </div>
+            </div>
             <div class="grid-three">
               <label>
                 <span>命名前缀</span>
@@ -161,6 +194,6 @@
       </section>
     </main>
 
-    <script src="/app.js?v=22"></script>
+    <script src="/app.js?v=23"></script>
   </body>
 </html>

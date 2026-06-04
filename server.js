@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
+const aiConfigPath = path.join(__dirname, "ai-config.json");
 
 loadDotEnv(path.join(__dirname, ".env"));
+const savedAiConfig = loadAiConfig();
 
 const env = {
   port: numberEnv("PORT", 8787),
@@ -16,6 +18,12 @@ const env = {
   webPassword: process.env.WEB_PASSWORD || "",
   defaultSaveRoot: process.env.DEFAULT_SAVE_ROOT || "/影视",
   searchDepth: process.env.SEARCH_DEPTH || "0",
+  aiEnabled: boolEnv("AI_ENABLED", false),
+  openaiBaseUrl: trimSlash(process.env.OPENAI_BASE_URL || ""),
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  openaiModel: process.env.OPENAI_MODEL || "",
+  aiTimeoutMs: numberEnv("AI_TIMEOUT_MS", 20000),
+  aiConfidenceThreshold: numberEnv("AI_CONFIDENCE_THRESHOLD", 0.75),
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || "",
   telegramAllowedChatIds: new Set(
     (process.env.TELEGRAM_ALLOWED_CHAT_IDS || "")
@@ -105,9 +113,35 @@ async function handleApi(req, res, url) {
         defaultSaveRoot: env.defaultSaveRoot,
         searchDepth: env.searchDepth,
         passwordEnabled: Boolean(env.webPassword),
-        telegramEnabled: Boolean(env.telegramToken)
+        telegramEnabled: Boolean(env.telegramToken),
+        ai: publicAiConfig()
       }
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ai/config") {
+    return sendJson(res, 200, {
+      success: true,
+      data: publicAiConfig()
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ai/config") {
+    const body = await readJson(req);
+    const result = saveAiConfig(body || {});
+    return sendJson(res, result.success ? 200 : 400, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ai/test") {
+    const body = await readJson(req);
+    const result = await testAiConnection(body || {});
+    return sendJson(res, result.success ? 200 : 502, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ai/rename-preview") {
+    const body = await readJson(req);
+    const result = await aiRenamePreview(body || {});
+    return sendJson(res, result.success ? 200 : 502, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/health") {
@@ -356,6 +390,103 @@ async function getShareDetail(input) {
   };
 }
 
+async function testAiConnection(input = {}) {
+  const config = aiConfig(input);
+  if (!config.enabled) return { success: false, message: "AI 未启用" };
+  if (!config.baseUrl || !config.apiKey || !config.model) {
+    return { success: false, message: "请先填写 AI API 地址、Key 和模型" };
+  }
+
+  const result = await callOpenAiChat(config, [
+    { role: "system", content: "Return JSON only." },
+    { role: "user", content: "请返回 {\"ok\":true,\"type\":\"connection_test\"}" }
+  ], { maxTokens: 80 });
+
+  if (!result.success) return result;
+  const parsed = parseAiJson(result.content);
+  return {
+    success: Boolean(parsed?.ok),
+    message: parsed?.ok ? "AI 模型连接成功" : "AI 模型已响应，但返回格式不符合预期",
+    data: {
+      model: config.model,
+      baseUrl: config.baseUrl,
+      response: parsed || result.content
+    }
+  };
+}
+
+async function aiRenamePreview(input = {}) {
+  const config = aiConfig(input.config || {});
+  if (!config.enabled) return { success: false, message: "AI 未启用" };
+  if (!config.baseUrl || !config.apiKey || !config.model) {
+    return { success: false, message: "请先填写 AI API 地址、Key 和模型" };
+  }
+
+  const files = (Array.isArray(input.files) ? input.files : [])
+    .filter((file) => file && !file.isDir)
+    .slice(0, 80)
+    .map((file) => ({
+      name: String(file.name || ""),
+      size: file.size || "",
+      localLabel: file.episodeLabel || file.analysis?.label || "",
+      localConfidence: file.analysis?.confidence || ""
+    }))
+    .filter((file) => file.name);
+
+  if (!files.length) return { success: false, message: "没有可交给 AI 判断的视频文件" };
+
+  const taskname = String(input.taskname || "").trim();
+  const prefix = String(input.prefix || taskname || "").trim();
+  const mode = String(input.mode || "auto").trim();
+  const threshold = clampConfidence(input.confidenceThreshold ?? config.confidenceThreshold);
+  const prompt = [
+    "你是影视文件命名识别助手，只返回严格 JSON。",
+    "任务：判断这些文件属于电视剧还是综艺，并给出适合媒体库刮削的集数/期数标签。",
+    "重要规则：",
+    "1. 综艺中 2026.05.20、20260604、2026-06-03 这类日期不能直接当作期数，除非文件名同时明确写了第几期。",
+    "2. 能识别上/中/下、加更、纯享、特别篇、番外、先导片、花絮、会员版。",
+    "3. 不确定时 confidence 必须低于阈值，并 needsConfirm=true。",
+    "4. suggestedName 要保留原扩展名。",
+    "5. mediaType 只能是 tv、variety、unknown。",
+    "输出格式：",
+    "{\"mediaType\":\"variety\",\"confidence\":0.9,\"items\":[{\"originalName\":\"原文件名.mp4\",\"mediaType\":\"variety\",\"episodeLabel\":\"第2期上\",\"number\":2,\"part\":\"上\",\"special\":\"\",\"suggestedName\":\"节目名第2期上.mp4\",\"confidence\":0.92,\"needsConfirm\":false,\"reason\":\"理由\"}]}",
+    "",
+    JSON.stringify({
+      taskname,
+      prefix,
+      requestedMode: mode,
+      confidenceThreshold: threshold,
+      files
+    })
+  ].join("\n");
+
+  const result = await callOpenAiChat(config, [
+    { role: "system", content: "You return valid JSON only. Do not wrap JSON in markdown." },
+    { role: "user", content: prompt }
+  ], { maxTokens: 2200 });
+
+  if (!result.success) return result;
+  const parsed = parseAiJson(result.content);
+  if (!parsed || !Array.isArray(parsed.items)) {
+    return {
+      success: false,
+      message: "AI 返回格式不可解析，已保留本地规则",
+      data: { raw: result.content.slice(0, 1200) }
+    };
+  }
+
+  const items = normalizeAiRenameItems(parsed.items, files, threshold);
+  return {
+    success: true,
+    message: "AI 已完成文件名判断",
+    data: {
+      mediaType: normalizeAiMediaType(parsed.mediaType),
+      confidence: clampConfidence(parsed.confidence),
+      items
+    }
+  };
+}
+
 async function validateCandidates(candidates) {
   const valid = [];
   let invalidCount = 0;
@@ -429,6 +560,63 @@ async function qasRawFetch(endpoint, options = {}) {
   const url = new URL(endpoint, env.qasHost);
   url.searchParams.set("token", env.qasToken);
   return fetch(url, options);
+}
+
+async function callOpenAiChat(config, messages, { maxTokens = 1200 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  try {
+    const body = {
+      model: config.model,
+      messages,
+      temperature: 0.1,
+      max_tokens: maxTokens,
+      response_format: { type: "json_object" }
+    };
+    let response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    let text = await response.text();
+    let parsed = safeJson(text);
+    const errorText = parsed?.error?.message || parsed?.message || text;
+    if (!response.ok && /response_format|json_object/i.test(errorText)) {
+      delete body.response_format;
+      response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      text = await response.text();
+      parsed = safeJson(text);
+    }
+    if (!response.ok) {
+      return {
+        success: false,
+        message: parsed?.error?.message || parsed?.message || `AI 接口返回 ${response.status}`,
+        data: parsed || text.slice(0, 1200)
+      };
+    }
+    const content = parsed?.choices?.[0]?.message?.content || "";
+    if (!content) return { success: false, message: "AI 没有返回内容", data: parsed };
+    return { success: true, content, data: parsed };
+  } catch (error) {
+    return {
+      success: false,
+      message: error.name === "AbortError" ? "AI 请求超时" : `AI 请求失败：${error.message}`
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function normalizeTask(input = {}) {
@@ -552,6 +740,141 @@ function assistantMessage(message) {
   return { success: true, type: "message", message };
 }
 
+function aiConfig(override = {}) {
+  const saved = savedAiConfig || {};
+  const baseUrl = trimSlash(String(override.baseUrl || saved.baseUrl || env.openaiBaseUrl || ""));
+  const model = String(override.model || saved.model || env.openaiModel || "").trim();
+  const apiKey = String(override.apiKey || saved.apiKey || env.openaiApiKey || "").trim();
+  const enabled =
+    typeof override.enabled === "boolean"
+      ? override.enabled
+      : typeof saved.enabled === "boolean"
+        ? saved.enabled
+        : env.aiEnabled;
+  return {
+    enabled,
+    baseUrl,
+    model,
+    apiKey,
+    timeoutMs: Math.max(3000, Number(override.timeoutMs || saved.timeoutMs || env.aiTimeoutMs || 20000)),
+    confidenceThreshold: clampConfidence(override.confidenceThreshold ?? saved.confidenceThreshold ?? env.aiConfidenceThreshold)
+  };
+}
+
+function publicAiConfig() {
+  const config = aiConfig();
+  return {
+    enabled: config.enabled,
+    baseUrl: config.baseUrl,
+    model: config.model,
+    configured: Boolean(config.baseUrl && config.apiKey && config.model),
+    hasApiKey: Boolean(config.apiKey),
+    timeoutMs: config.timeoutMs,
+    confidenceThreshold: config.confidenceThreshold
+  };
+}
+
+function saveAiConfig(input = {}) {
+  const current = aiConfig();
+  const next = {
+    enabled: Boolean(input.enabled),
+    baseUrl: trimSlash(String(input.baseUrl || "").trim()),
+    model: String(input.model || "").trim(),
+    apiKey: String(input.apiKey || "").trim() || current.apiKey,
+    timeoutMs: Math.max(3000, Number(input.timeoutMs || current.timeoutMs || 20000)),
+    confidenceThreshold: clampConfidence(input.confidenceThreshold ?? current.confidenceThreshold)
+  };
+  if (!next.enabled) {
+    try {
+      fs.writeFileSync(aiConfigPath, JSON.stringify(next, null, 2), "utf8");
+      Object.assign(savedAiConfig, next);
+      return {
+        success: true,
+        message: "AI 已关闭",
+        data: publicAiConfig()
+      };
+    } catch (error) {
+      return { success: false, message: `保存 AI 配置失败：${error.message}` };
+    }
+  }
+  if (!next.baseUrl || !next.model) {
+    return { success: false, message: "请填写 AI API 地址和模型" };
+  }
+  if (!next.apiKey) {
+    return { success: false, message: "请填写 AI API Key" };
+  }
+  try {
+    fs.writeFileSync(aiConfigPath, JSON.stringify(next, null, 2), "utf8");
+    Object.assign(savedAiConfig, next);
+    return {
+      success: true,
+      message: "AI 配置已保存",
+      data: publicAiConfig()
+    };
+  } catch (error) {
+    return { success: false, message: `保存 AI 配置失败：${error.message}` };
+  }
+}
+
+function loadAiConfig() {
+  if (!fs.existsSync(aiConfigPath)) return {};
+  try {
+    const parsed = safeJson(fs.readFileSync(aiConfigPath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeAiRenameItems(items, inputFiles, threshold) {
+  const knownNames = new Set(inputFiles.map((file) => file.name));
+  return items
+    .filter((item) => item && knownNames.has(String(item.originalName || item.name || "")))
+    .map((item) => {
+      const confidence = clampConfidence(item.confidence);
+      const originalName = String(item.originalName || item.name || "");
+      const suggestedName = String(item.suggestedName || originalName).trim() || originalName;
+      return {
+        originalName,
+        mediaType: normalizeAiMediaType(item.mediaType),
+        episodeLabel: String(item.episodeLabel || "").trim(),
+        number: Number.isFinite(Number(item.number)) ? Number(item.number) : null,
+        part: String(item.part || "").trim(),
+        special: String(item.special || "").trim(),
+        suggestedName,
+        confidence,
+        needsConfirm: Boolean(item.needsConfirm) || confidence < threshold,
+        reason: String(item.reason || "").slice(0, 300)
+      };
+    });
+}
+
+function normalizeAiMediaType(value) {
+  const text = String(value || "").toLowerCase();
+  if (text === "tv" || text.includes("电视剧")) return "tv";
+  if (text === "variety" || text.includes("综艺")) return "variety";
+  return "unknown";
+}
+
+function parseAiJson(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const direct = safeJson(raw);
+  if (direct) return direct;
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) return safeJson(fenced[1].trim());
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start !== -1 && end > start) return safeJson(raw.slice(start, end + 1));
+  return null;
+}
+
+function clampConfidence(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(1, Math.max(0, number));
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -616,6 +939,12 @@ function trimSlash(value) {
 function numberEnv(key, fallback) {
   const value = Number(process.env[key]);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function boolEnv(key, fallback) {
+  const value = String(process.env[key] || "").trim().toLowerCase();
+  if (!value) return fallback;
+  return ["1", "true", "yes", "on"].includes(value);
 }
 
 function loadDotEnv(file) {

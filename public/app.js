@@ -9,7 +9,10 @@ const state = {
   qasTasks: [],
   previewPath: [],
   lastPreviewRawFiles: [],
-  lastPreviewFiles: []
+  lastPreviewFiles: [],
+  aiConfig: { enabled: false, configured: false, confidenceThreshold: 0.75 },
+  aiByName: new Map(),
+  aiMediaType: ""
 };
 
 const els = {
@@ -30,6 +33,14 @@ const els = {
   runNow: document.querySelector("#runNow"),
   renamePrefix: document.querySelector("#renamePrefix"),
   renameModeSwitch: document.querySelector("#renameModeSwitch"),
+  aiEnabled: document.querySelector("#aiEnabled"),
+  aiBaseUrl: document.querySelector("#aiBaseUrl"),
+  aiModel: document.querySelector("#aiModel"),
+  aiApiKey: document.querySelector("#aiApiKey"),
+  aiConfidenceThreshold: document.querySelector("#aiConfidenceThreshold"),
+  aiStatus: document.querySelector("#aiStatus"),
+  saveAiConfig: document.querySelector("#saveAiConfig"),
+  testAiConfig: document.querySelector("#testAiConfig"),
   renameStart: document.querySelector("#renameStart"),
   renamePad: document.querySelector("#renamePad"),
   applyRename: document.querySelector("#applyRename"),
@@ -123,10 +134,13 @@ els.cleanupMatchingTasks.addEventListener("click", cleanupCurrentTaskFamily);
 els.renameModeSwitch.addEventListener("click", (event) => {
   const mode = event.target.dataset.renameMode;
   if (!mode) return;
-  state.renameMode = mode;
-  els.renameModeSwitch.querySelectorAll("[data-rename-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.renameMode === mode);
-  });
+  setRenameMode(mode);
+});
+els.saveAiConfig.addEventListener("click", saveAiConfig);
+els.testAiConfig.addEventListener("click", testAiConfig);
+els.aiEnabled.addEventListener("change", () => {
+  state.aiConfig.enabled = els.aiEnabled.checked;
+  updateAiStatus();
   rerenderCurrentPreview();
 });
 els.renamePrefix.addEventListener("input", () => {
@@ -168,6 +182,7 @@ async function enterApp() {
   const config = await api("/api/config", { method: "GET" });
   if (config.success) {
     state.defaultSaveRoot = config.data.defaultSaveRoot || state.defaultSaveRoot;
+    applyAiConfig(config.data.ai || {});
   }
   await checkHealth();
 }
@@ -196,6 +211,87 @@ function switchView(view) {
   els.viewPanels.forEach((panel) => {
     panel.classList.toggle("active-view", panel.dataset.viewPanel === view);
   });
+}
+
+function setRenameMode(mode, { rerender = true } = {}) {
+  state.renameMode = mode;
+  els.renameModeSwitch.querySelectorAll("[data-rename-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.renameMode === mode);
+  });
+  if (rerender) rerenderCurrentPreview();
+}
+
+function applyAiConfig(config) {
+  state.aiConfig = {
+    enabled: Boolean(config.enabled),
+    configured: Boolean(config.configured),
+    hasApiKey: Boolean(config.hasApiKey),
+    baseUrl: config.baseUrl || "",
+    model: config.model || "",
+    confidenceThreshold: Number(config.confidenceThreshold || 0.75),
+    timeoutMs: Number(config.timeoutMs || 20000)
+  };
+  els.aiEnabled.checked = state.aiConfig.enabled;
+  els.aiBaseUrl.value = state.aiConfig.baseUrl;
+  els.aiModel.value = state.aiConfig.model;
+  els.aiApiKey.value = "";
+  els.aiConfidenceThreshold.value = state.aiConfig.confidenceThreshold;
+  updateAiStatus();
+}
+
+function aiConfigFromForm() {
+  return {
+    enabled: els.aiEnabled.checked,
+    baseUrl: els.aiBaseUrl.value.trim(),
+    model: els.aiModel.value.trim(),
+    apiKey: els.aiApiKey.value.trim(),
+    confidenceThreshold: Number(els.aiConfidenceThreshold.value || 0.75),
+    timeoutMs: state.aiConfig.timeoutMs || 20000
+  };
+}
+
+async function saveAiConfig() {
+  els.saveAiConfig.disabled = true;
+  els.saveAiConfig.textContent = "保存中";
+  const result = await api("/api/ai/config", {
+    method: "POST",
+    body: JSON.stringify(aiConfigFromForm())
+  });
+  els.saveAiConfig.disabled = false;
+  els.saveAiConfig.textContent = "保存 AI 配置";
+  if (result.success) {
+    applyAiConfig(result.data);
+    addMessage("assistant", "AI 配置已保存。");
+  } else {
+    updateAiStatus(result.message || "保存失败", "bad");
+    addMessage("assistant", `AI 配置保存失败：${result.message || "未知错误"}`);
+  }
+}
+
+async function testAiConfig() {
+  els.testAiConfig.disabled = true;
+  els.testAiConfig.textContent = "测试中";
+  updateAiStatus("测试中");
+  const result = await api("/api/ai/test", {
+    method: "POST",
+    body: JSON.stringify(aiConfigFromForm())
+  }, false);
+  els.testAiConfig.disabled = false;
+  els.testAiConfig.textContent = "测试连接";
+  updateAiStatus(result.message || (result.success ? "连接成功" : "连接失败"), result.success ? "ok" : "bad");
+  addMessage("assistant", result.success ? "AI 模型连接成功。" : `AI 模型连接失败：${result.message || "未知错误"}`);
+}
+
+function updateAiStatus(text = "", tone = "") {
+  const status = text || (
+    state.aiConfig.enabled
+      ? state.aiConfig.configured
+        ? `已配置 ${state.aiConfig.model || ""}`.trim()
+        : "已开启，未配置"
+      : "未开启"
+  );
+  els.aiStatus.textContent = status;
+  els.aiStatus.className = tone || (state.aiConfig.enabled && state.aiConfig.configured ? "ok" : "");
 }
 
 function handleChatResponse(data) {
@@ -428,13 +524,16 @@ async function loadSharePreview({ name = "顶层", shareUrl, mode = "reset" }) {
   }
 
   state.lastPreviewRawFiles = result.data || [];
+  state.aiByName = new Map();
+  state.aiMediaType = "";
   const files = buildRenamePreview(state.lastPreviewRawFiles);
   state.lastPreviewFiles = files;
   renderPreview(files);
   switchView("preview");
+  await applyAiRenamePreview(state.lastPreviewRawFiles);
 }
 
-function buildRenamePreview(files) {
+function buildRenamePreview(files, aiByName = state.aiByName) {
   const prefix = els.renamePrefix.value.trim();
   const start = Math.max(0, Number(els.renameStart.value || 1));
   const pad = Math.max(1, Number(els.renamePad.value || 3));
@@ -449,9 +548,13 @@ function buildRenamePreview(files) {
   return sorted.map((file, index) => {
     const ext = extensionOf(file.name);
     const fallbackNumber = start + index;
-    const analysis = analyzeFileName(file.name, state.renameMode, fallbackNumber);
+    const localAnalysis = analyzeFileName(file.name, state.renameMode, fallbackNumber);
+    const aiItem = state.aiConfig.enabled ? aiByName.get(file.name) : null;
+    const analysis = aiItem ? mergeAiAnalysis(localAnalysis, aiItem) : localAnalysis;
     const generated = file.isDir
       ? file.name
+      : aiItem?.suggestedName
+      ? aiItem.suggestedName
       : prefix
       ? buildPreviewName(prefix, ext, analysis, pad)
       : file.renamed || file.name;
@@ -460,6 +563,9 @@ function buildRenamePreview(files) {
       analysis,
       episode: analysis.number,
       episodeLabel: analysis.label,
+      aiMediaType: aiItem?.mediaType || "",
+      aiConfidence: aiItem ? aiItem.confidence : null,
+      aiReason: aiItem?.reason || "",
       needsConfirm: analysis.confidence !== "high",
       previewName: generated
     };
@@ -471,6 +577,66 @@ function rerenderCurrentPreview() {
   const files = buildRenamePreview(state.lastPreviewRawFiles);
   state.lastPreviewFiles = files;
   renderPreview(files);
+}
+
+async function applyAiRenamePreview(rawFiles) {
+  if (!state.aiConfig.enabled || !state.aiConfig.configured) return;
+  const videos = (rawFiles || []).filter((file) => !file.isDir && isVideoFile(file.name));
+  if (!videos.length) return;
+  updateAiStatus("AI 判断中");
+  const result = await fetchAiRenameItems(rawFiles);
+  if (!result.success) {
+    updateAiStatus("AI 失败，本地兜底", "bad");
+    addMessage("assistant", `AI 判断失败，已保留本地规则：${result.message || "未知错误"}`);
+    return;
+  }
+  state.aiByName = result.itemsByName;
+  state.aiMediaType = result.mediaType || "";
+  if (state.aiMediaType === "tv" || state.aiMediaType === "variety") {
+    setRenameMode(state.aiMediaType, { rerender: false });
+  }
+  updateAiStatus(`AI 已判断 ${result.itemsByName.size} 个文件`, "ok");
+  rerenderCurrentPreview();
+}
+
+async function fetchAiRenameItems(rawFiles) {
+  if (!state.aiConfig.enabled || !state.aiConfig.configured) {
+    return { success: false, message: "AI 未启用", itemsByName: new Map() };
+  }
+  const localFiles = buildRenamePreview(rawFiles || [], new Map());
+  const response = await api("/api/ai/rename-preview", {
+    method: "POST",
+    body: JSON.stringify({
+      taskname: els.taskname.value.trim(),
+      prefix: els.renamePrefix.value.trim(),
+      mode: state.renameMode,
+      confidenceThreshold: Number(els.aiConfidenceThreshold.value || 0.75),
+      files: localFiles
+    })
+  }, false);
+  if (!response.success) return response;
+  const itemsByName = new Map();
+  (response.data?.items || []).forEach((item) => {
+    itemsByName.set(item.originalName, item);
+  });
+  return {
+    success: true,
+    message: response.message,
+    mediaType: response.data?.mediaType || "",
+    itemsByName
+  };
+}
+
+function mergeAiAnalysis(localAnalysis, aiItem) {
+  const number = Number.isFinite(Number(aiItem.number)) ? Number(aiItem.number) : localAnalysis.number;
+  return {
+    ...localAnalysis,
+    mode: aiItem.mediaType || localAnalysis.mode,
+    confidence: aiItem.needsConfirm ? "low" : "high",
+    number,
+    sortNumber: number || localAnalysis.sortNumber,
+    label: aiItem.episodeLabel || localAnalysis.label
+  };
 }
 
 function renderPreview(files) {
@@ -522,6 +688,8 @@ function renderPreview(files) {
       </div>
       <div class="file-meta">
         ${file.isDir ? '<span class="pill blue">目录</span>' : `<span class="pill blue">${escapeHtml(file.episodeLabel || `第 ${file.episode} 集`)}</span>`}
+        ${!file.isDir && file.aiMediaType ? `<span class="pill gray">${escapeHtml(file.aiMediaType === "variety" ? "综艺" : file.aiMediaType === "tv" ? "电视剧" : "未知")}</span>` : ""}
+        ${!file.isDir && file.aiConfidence !== null ? `<span class="pill gray">AI ${escapeHtml(Math.round(file.aiConfidence * 100))}%</span>` : ""}
         ${!file.isDir && file.needsConfirm ? '<span class="pill orange">待确认</span>' : ""}
         ${file.isDir ? "" : `<span class="pill green">${escapeHtml(formatSize(file.size))}</span>`}
       </div>
@@ -714,11 +882,13 @@ function selectFileTaskPlan(baseTask) {
           node.loading = false;
           node.loaded = true;
           if (result.success) {
+            const aiResult = await fetchAiRenameItems(result.data || []);
             node.files = buildPickerEntries(result.data || [], {
               baseTask,
               shareurl: node.shareurl,
               savepath: node.savepath,
               taskSuffix: node.taskSuffix,
+              aiByName: aiResult.success ? aiResult.itemsByName : new Map(),
               depth: node.depth
             });
           } else {
@@ -742,7 +912,7 @@ function selectFileTaskPlan(baseTask) {
 }
 
 function buildPickerEntries(files, context) {
-  const preview = buildRenamePreview(files || []);
+  const preview = buildRenamePreview(files || [], context.aiByName || state.aiByName);
   return preview.map((file, index) => {
     const id = `${context.shareurl || "share"}::${context.depth}:${index}:${file.name}`;
     if (file.isDir) {

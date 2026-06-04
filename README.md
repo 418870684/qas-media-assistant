@@ -9,6 +9,7 @@
 - 直接粘贴夸克分享链接并预览文件。
 - 进入分享目录，查看目录内文件。
 - 显示原文件名、新文件名、集数、文件大小。
+- 可选 OpenAI-compatible AI 识别，辅助判断电视剧 / 综艺、期数、上下期和特殊版。
 - 创建 QAS 任务，并可选择立即运行。
 - 设置 `WEB_PASSWORD` 后，访问页面会先显示登录页，登录成功后才进入主界面。
 - 可选 Telegram Bot。
@@ -31,6 +32,11 @@ QAS_API_TOKEN=你的QAS_API_TOKEN
 WEB_PASSWORD=设置一个长一点的网页密码
 DEFAULT_SAVE_ROOT=/影视
 SEARCH_DEPTH=0
+AI_ENABLED=false
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+AI_CONFIDENCE_THRESHOLD=0.75
 ```
 
 说明：
@@ -39,6 +45,21 @@ SEARCH_DEPTH=0
 - `PUBLISH_HOST=0.0.0.0`：允许局域网直接访问 `http://NAS内网IP:8787`。
 - `QAS_HOST`：容器里能访问到的 QAS 地址。QAS 也在同一台 NAS 时，优先填 NAS 内网 IP，不要填 `127.0.0.1`。
 - `WEB_PASSWORD`：远程访问时强烈建议填写。
+- `OPENAI_BASE_URL`：OpenAI-compatible API 地址，需包含 `/v1`。
+- `OPENAI_MODEL`：用于文件名判断的模型，页面里也可以测试当前模型是否可用。
+- `AI_CONFIDENCE_THRESHOLD`：低于这个置信度会显示 `待确认`。
+
+## AI 识别
+
+AI 识别是可选能力。未配置或调用失败时，页面会继续使用本地规则生成预览，不会阻断转存任务创建。
+
+支持方式：
+
+- 在 `.env` 中配置 `AI_ENABLED`、`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`。
+- 或在网页“创建任务”里的 AI 识别区域填写配置并点击“保存 AI 配置”。
+- 点击“测试连接”会实际请求当前模型，成功后再用于文件名判断。
+
+AI 只接收任务名、目录名、文件名和大小，不会接收 QAS Token。API Key 只保存在后端，不会回显到浏览器。
 
 ## 登录与安全
 
@@ -94,6 +115,11 @@ QAS_API_TOKEN=你的QAS_API_TOKEN
 WEB_PASSWORD=设置一个长一点的网页密码
 DEFAULT_SAVE_ROOT=/影视
 SEARCH_DEPTH=0
+AI_ENABLED=false
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+AI_CONFIDENCE_THRESHOLD=0.75
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_CHAT_IDS=
 ```

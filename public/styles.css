@@ -549,6 +549,11 @@ button:disabled {
   color: #24924f;
 }
 
+.pill.gray {
+  background: #f3f5f7;
+  color: var(--muted);
+}
+
 .pill.orange {
   background: #fff6e6;
   color: #ad6800;
@@ -626,6 +631,37 @@ label {
   background: #fff;
   color: var(--blue);
   box-shadow: 0 5px 14px rgba(114, 128, 138, 0.14);
+}
+
+.ai-tools {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--soft);
+  padding: 12px;
+}
+
+.ai-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ai-head small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.ai-head small.ok {
+  color: #24924f;
+}
+
+.ai-head small.bad {
+  color: #d64d37;
 }
 
 .tool-row {
