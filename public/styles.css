@@ -506,6 +506,11 @@ button:disabled {
   background: #fbfdff;
 }
 
+.preview-row.has-conflict {
+  border-color: rgba(255, 59, 48, 0.45);
+  background: #fffafa;
+}
+
 .file-main {
   min-width: 0;
 }
@@ -526,6 +531,53 @@ button:disabled {
   margin-top: 6px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.preview-row .clean {
+  margin-top: 4px;
+  color: #8a98a3;
+  font-size: 12px;
+}
+
+.preview-row .ai-note {
+  margin-top: 4px;
+  color: #6f7f8c;
+  font-size: 12px;
+}
+
+.suffix-prompt {
+  margin-top: 12px;
+  border: 1px dashed #ffc46b;
+  border-radius: 14px;
+  background: #fffaf0;
+  padding: 12px;
+}
+
+.suffix-prompt strong,
+.suffix-prompt p {
+  display: block;
+}
+
+.suffix-prompt p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.suffix-actions,
+.suffix-add-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.suffix-actions button {
+  min-height: 36px;
+  padding: 6px 8px;
+  border-color: #f0d7a0;
+  background: #fff;
+  font-size: 12px;
 }
 
 .file-meta {
@@ -564,6 +616,11 @@ button:disabled {
 .pill.orange {
   background: #fff6e6;
   color: #ad6800;
+}
+
+.pill.red {
+  background: #fff1f0;
+  color: #c53030;
 }
 
 .preview-back,
@@ -869,6 +926,51 @@ label {
   min-width: 140px;
 }
 
+.suffix-manager {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.suffix-add-row {
+  grid-template-columns: minmax(0, 1fr) 120px;
+  margin: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+  padding: 14px 20px;
+}
+
+.suffix-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  padding: 14px;
+}
+
+.suffix-row strong,
+.suffix-row small {
+  display: block;
+}
+
+.suffix-row small {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.suffix-row button {
+  min-width: 84px;
+  min-height: 38px;
+}
+
+.suffix-row button.danger {
+  border-color: #ffd7d7;
+  background: #fff0f0;
+  color: #d33;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -907,6 +1009,11 @@ label {
 
   .view-tabs {
     grid-template-columns: 1fr 1fr;
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 10px 28px rgba(23, 32, 38, 0.12);
   }
 
   .search-column {

@@ -7,11 +7,16 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const aiConfigPath = path.join(__dirname, "ai-config.json");
+const suffixConfigPath = path.join(__dirname, "suffix-config.json");
 
 loadDotEnv(path.join(__dirname, ".env"));
 const savedAiConfig = loadAiConfig();
+const savedSuffixConfig = loadSuffixConfig();
 const envSet = {
   aiEnabled: hasEnv("AI_ENABLED"),
+  openaiBaseUrl: hasEnv("OPENAI_BASE_URL"),
+  openaiApiKey: hasEnv("OPENAI_API_KEY"),
+  openaiModel: hasEnv("OPENAI_MODEL"),
   aiTimeoutMs: hasEnv("AI_TIMEOUT_MS"),
   aiConfidenceThreshold: hasEnv("AI_CONFIDENCE_THRESHOLD")
 };
@@ -68,10 +73,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(env.port, () => {
-  console.log(`QAS Media Assistant listening on http://0.0.0.0:${env.port}`);
-  startTelegramBot();
-});
+if (process.env.NODE_ENV !== "test") {
+  server.listen(env.port, () => {
+    console.log(`QAS Media Assistant listening on http://0.0.0.0:${env.port}`);
+    startTelegramBot();
+  });
+}
 
 async function handlePublicApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/session") {
@@ -119,9 +126,34 @@ async function handleApi(req, res, url) {
         searchDepth: env.searchDepth,
         passwordEnabled: Boolean(env.webPassword),
         telegramEnabled: Boolean(env.telegramToken),
-        ai: publicAiConfig()
+        ai: publicAiConfig(),
+        suffixes: publicSuffixConfig()
       }
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/suffixes") {
+    return sendJson(res, 200, {
+      success: true,
+      data: publicSuffixConfig()
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/suffixes") {
+    const body = await readJson(req);
+    const result = addUserSuffix(body?.value || body?.suffix || "");
+    return sendJson(res, result.success ? 200 : 400, result);
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/api/suffixes") {
+    const result = removeUserSuffix(url.searchParams.get("value") || "");
+    return sendJson(res, result.success ? 200 : 400, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/suffixes/system") {
+    const body = await readJson(req);
+    const result = setSystemSuffixEnabled(body?.value || "", body?.enabled !== false);
+    return sendJson(res, result.success ? 200 : 400, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/ai/config") {
@@ -296,10 +328,11 @@ async function searchResources(q, depth = "0") {
 
   const candidates = rows.map(normalizeCandidate).filter((item) => item.shareurl);
   const validation = await validateCandidates(candidates);
+  const sorted = sortCandidatesByTime(validation.valid);
   return {
     success: true,
     message: `找到 ${validation.valid.length} 个可用候选资源，已剔除 ${validation.invalidCount} 个失效资源`,
-    data: validation.valid
+    data: sorted
   };
 }
 
@@ -432,6 +465,9 @@ async function aiRenamePreview(input = {}) {
     .slice(0, 80)
     .map((file) => ({
       name: String(file.name || ""),
+      originalName: String(file.originalName || file.name || ""),
+      fileId: String(file.fileId || ""),
+      cleanName: cleanRecognitionName(file.cleanName || file.name || ""),
       size: file.size || ""
     }))
     .filter((file) => file.name);
@@ -452,8 +488,15 @@ async function aiRenamePreview(input = {}) {
     "4. 不确定时 fileType=unknown，confidence 必须低于阈值，并 needsConfirm=true。",
     "5. mediaType 只能是 tv、variety、unknown。",
     "6. fileType 只能是 main、pure、bonus、special、press、pilot、extra、unknown。",
+    "7. fileId 用于精确匹配原文件，必须原样返回；originalName 只作为人工阅读和兜底匹配，不要被防和谐字符干扰；判断时优先看 cleanName。",
+    "8. 不要生成最终文件名，只返回结构化判断。",
+    "9. 必须保留上、中、下、完整版、会员版、高码率、4K、HDR、杜比等区分信息。",
+    "10. 副本存档中、副本解锁中、解锁中、居民采访、采访、番外、花絮、未播、预告属于 extra，不是普通正片。",
+    "11. 如果 cleanName 已经明确包含 第1期上 或 第1期下，episodeLabel 也必须包含 上 或 下。",
+    "12. 如果日期后、集数前存在有意义标题，如《副本存档中》第1期、居民采访第1期，通常属于 extra；不要因为包含第1期就判成 main。",
+    "13. 正片 main 只能是日期/清晰度/版本 + 第几期/上中下 这类主体内容，不能带采访、存档、解锁、花絮等独立主题。",
     "输出格式：",
-    "{\"mediaType\":\"variety\",\"confidence\":0.9,\"items\":[{\"originalName\":\"原文件名.mp4\",\"mediaType\":\"variety\",\"fileType\":\"pure\",\"episodeLabel\":\"纯享\",\"number\":null,\"part\":\"\",\"special\":\"撕名牌游戏纯享\",\"title\":\"撕名牌游戏纯享\",\"confidence\":0.92,\"needsConfirm\":false,\"reason\":\"文件名包含纯享，不属于正片\"}]}",
+    "{\"mediaType\":\"variety\",\"confidence\":0.9,\"items\":[{\"fileId\":\"原样返回输入 fileId\",\"originalName\":\"原文件名.mp4\",\"mediaType\":\"variety\",\"fileType\":\"pure\",\"episodeLabel\":\"纯享\",\"number\":null,\"partTag\":\"\",\"versionTags\":[],\"special\":\"撕名牌游戏纯享\",\"title\":\"撕名牌游戏纯享\",\"confidence\":0.92,\"needsConfirm\":false,\"reason\":\"文件名包含纯享，不属于正片\"}]}",
     "",
     JSON.stringify({
       taskname,
@@ -637,12 +680,77 @@ function normalizeCandidate(raw, index) {
   const shareurl = raw.shareurl || raw.shareUrl || raw.url || raw.link || extractShareUrl(JSON.stringify(raw));
   const title = raw.taskname || raw.title || raw.name || raw.text || raw.label || `候选资源 ${index + 1}`;
   const source = raw.source || raw.sourceName || raw.source_name || raw.site || raw.provider || raw.engine || raw.from || "盘搜";
+  const note = raw.note || raw.desc || raw.description || "";
+  const timeText = candidateTimeText(raw);
+  const displayTime = timeText || candidateDateText(`${title} ${note}`);
+  const sortTime = candidateSortTime(timeText || `${title} ${note}`);
   return {
     title: String(title),
     shareurl: String(shareurl || ""),
     source: String(source),
-    note: raw.note || raw.desc || raw.description || ""
+    note,
+    timeText,
+    displayTime,
+    sortTime,
+    originalIndex: index
   };
+}
+
+function sortCandidatesByTime(candidates) {
+  return [...(candidates || [])].sort((a, b) => {
+    const at = Number.isFinite(a.sortTime) ? a.sortTime : Number.POSITIVE_INFINITY;
+    const bt = Number.isFinite(b.sortTime) ? b.sortTime : Number.POSITIVE_INFINITY;
+    if (at !== bt) return at - bt;
+    return Number(a.originalIndex || 0) - Number(b.originalIndex || 0);
+  });
+}
+
+function candidateTimeText(raw = {}) {
+  const value =
+    raw.datetime ||
+    raw.time ||
+    raw.date ||
+    raw.create_time ||
+    raw.created_at ||
+    raw.update_time ||
+    raw.updated_at ||
+    raw.publish_time ||
+    raw.published_at ||
+    raw.insert_time ||
+    "";
+  return String(value || "").trim();
+}
+
+function candidateDateText(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^\d{13}$/.test(text)) return formatCandidateDate(Number(text));
+  if (/^\d{10}$/.test(text)) return formatCandidateDate(Number(text) * 1000);
+  const ymd = text.match(/((?:19|20)\d{2})[年._/-]?((?:1[0-2]|0?[1-9]))[月._/-]?((?:3[01]|[12]\d|0?[1-9]))/);
+  if (ymd) return `${ymd[1]}-${ymd[2].padStart(2, "0")}-${ymd[3].padStart(2, "0")}`;
+  const compact = text.match(/((?:19|20)\d{2})((?:1[0-2]|0[1-9]))((?:3[01]|[12]\d|0[1-9]))/);
+  if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+  return "";
+}
+
+function formatCandidateDate(time) {
+  if (!Number.isFinite(time)) return "";
+  const date = new Date(time);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+function candidateSortTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return NaN;
+  if (/^\d{13}$/.test(text)) return Number(text);
+  if (/^\d{10}$/.test(text)) return Number(text) * 1000;
+  const ymd = text.match(/((?:19|20)\d{2})[年._/-]?((?:1[0-2]|0?[1-9]))[月._/-]?((?:3[01]|[12]\d|0?[1-9]))/);
+  if (ymd) return Date.UTC(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]));
+  const compact = text.match(/((?:19|20)\d{2})((?:1[0-2]|0[1-9]))((?:3[01]|[12]\d|0[1-9]))/);
+  if (compact) return Date.UTC(Number(compact[1]), Number(compact[2]) - 1, Number(compact[3]));
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : NaN;
 }
 
 function normalizeShareDetail(result, shareurl = "") {
@@ -676,7 +784,9 @@ function normalizeShareDetail(result, shareurl = "") {
       file.name_after ||
       "";
     const fid = file.fid || file.file_id || "";
+    const fileId = file.fileId || file.id || file.fileid || fid || `${shareurl || "share"}::${index}::${original}`;
     return {
+      fileId: String(fileId),
       name: String(original),
       renamed: String(renamed || original),
       size: file.size || file.file_size || file.include_items || "",
@@ -773,18 +883,28 @@ function aiConfig(override = {}) {
 
 function publicAiConfig() {
   const config = aiConfig();
+  const envManaged = isAiEnvManaged();
   return {
     enabled: config.enabled,
     baseUrl: config.baseUrl,
     model: config.model,
     configured: Boolean(config.baseUrl && config.apiKey && config.model),
     hasApiKey: Boolean(config.apiKey),
+    source: envManaged ? "env" : "saved",
+    editable: !envManaged,
     timeoutMs: config.timeoutMs,
     confidenceThreshold: config.confidenceThreshold
   };
 }
 
 function saveAiConfig(input = {}) {
+  if (isAiEnvManaged()) {
+    return {
+      success: false,
+      message: "AI 配置由 .env 管理，请修改 .env 后重启服务",
+      data: publicAiConfig()
+    };
+  }
   const current = aiConfig();
   const next = {
     enabled: Boolean(input.enabled),
@@ -826,6 +946,10 @@ function saveAiConfig(input = {}) {
   }
 }
 
+function isAiEnvManaged() {
+  return envSet.aiEnabled || envSet.openaiBaseUrl || envSet.openaiApiKey || envSet.openaiModel;
+}
+
 function loadAiConfig() {
   if (!fs.existsSync(aiConfigPath)) return {};
   try {
@@ -836,22 +960,91 @@ function loadAiConfig() {
   }
 }
 
+function loadSuffixConfig() {
+  if (!fs.existsSync(suffixConfigPath)) return {};
+  try {
+    const parsed = safeJson(fs.readFileSync(suffixConfigPath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function publicSuffixConfig() {
+  return {
+    systemDisabled: Array.isArray(savedSuffixConfig.systemDisabled) ? savedSuffixConfig.systemDisabled : [],
+    user: Array.isArray(savedSuffixConfig.user) ? savedSuffixConfig.user : []
+  };
+}
+
+function saveSuffixConfig() {
+  fs.writeFileSync(suffixConfigPath, JSON.stringify(publicSuffixConfig(), null, 2), "utf8");
+}
+
+function cleanSuffixValue(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, "")
+    .trim()
+    .slice(0, 24);
+}
+
+function addUserSuffix(value) {
+  const suffix = cleanSuffixValue(value);
+  if (!suffix) return { success: false, message: "后缀不能为空", data: publicSuffixConfig() };
+  const user = new Set(publicSuffixConfig().user.map(cleanSuffixValue).filter(Boolean));
+  user.add(suffix);
+  savedSuffixConfig.user = [...user];
+  saveSuffixConfig();
+  return { success: true, message: "已加入常用后缀", data: publicSuffixConfig() };
+}
+
+function removeUserSuffix(value) {
+  const suffix = cleanSuffixValue(value);
+  if (!suffix) return { success: false, message: "后缀不能为空", data: publicSuffixConfig() };
+  savedSuffixConfig.user = publicSuffixConfig().user.filter((item) => cleanSuffixValue(item) !== suffix);
+  saveSuffixConfig();
+  return { success: true, message: "已删除用户后缀", data: publicSuffixConfig() };
+}
+
+function setSystemSuffixEnabled(value, enabled = true) {
+  const suffix = cleanSuffixValue(value);
+  if (!suffix) return { success: false, message: "后缀不能为空", data: publicSuffixConfig() };
+  const disabled = new Set(publicSuffixConfig().systemDisabled.map(cleanSuffixValue).filter(Boolean));
+  if (enabled) disabled.delete(suffix);
+  else disabled.add(suffix);
+  savedSuffixConfig.systemDisabled = [...disabled];
+  saveSuffixConfig();
+  return { success: true, message: enabled ? "已开启系统后缀" : "已关闭系统后缀", data: publicSuffixConfig() };
+}
+
 function normalizeAiRenameItems(items, inputFiles, threshold) {
-  const knownNames = new Set(inputFiles.map((file) => file.name));
+  const knownIds = new Set(inputFiles.map((file) => file.fileId).filter(Boolean));
+  const knownNames = new Set(inputFiles.map((file) => file.originalName || file.name));
   return items
-    .filter((item) => item && knownNames.has(String(item.originalName || item.name || "")))
+    .filter((item) => {
+      if (!item) return false;
+      const fileId = String(item.fileId || "").trim();
+      if (fileId && knownIds.has(fileId)) return true;
+      return knownNames.has(String(item.originalName || item.name || ""));
+    })
     .map((item) => {
       const confidence = clampConfidence(item.confidence);
+      const fileId = String(item.fileId || "").trim();
       const originalName = String(item.originalName || item.name || "");
       const suggestedName = String(item.suggestedName || originalName).trim() || originalName;
       const fileType = normalizeAiFileType(item.fileType || item.contentType || item.special || "");
       return {
+        fileId,
         originalName,
         mediaType: normalizeAiMediaType(item.mediaType),
         fileType,
         episodeLabel: String(item.episodeLabel || "").trim(),
         number: fileType === "main" && Number.isFinite(Number(item.number)) ? Number(item.number) : null,
-        part: String(item.part || "").trim(),
+        part: String(item.partTag || item.part || "").trim(),
+        partTag: String(item.partTag || item.part || "").trim(),
+        versionTag: Array.isArray(item.versionTags) ? item.versionTags.join("-") : String(item.versionTag || item.versionTags || "").trim(),
         special: String(item.special || "").trim(),
         title: String(item.title || item.special || "").trim(),
         suggestedName,
@@ -870,7 +1063,7 @@ function normalizeAiFileType(value) {
   if (text === "special" || text.includes("特辑") || text.includes("特别")) return "special";
   if (text === "press" || text.includes("发布")) return "press";
   if (text === "pilot" || text.includes("先导")) return "pilot";
-  if (text === "extra" || /花絮|番外|预告|未播|彩蛋/.test(text)) return "extra";
+  if (text === "extra" || /副本存档|副本解锁|解锁中|采访|花絮|番外|预告|未播|彩蛋/.test(text)) return "extra";
   return "unknown";
 }
 
@@ -879,6 +1072,62 @@ function normalizeAiMediaType(value) {
   if (text === "tv" || text.includes("电视剧")) return "tv";
   if (text === "variety" || text.includes("综艺")) return "variety";
   return "unknown";
+}
+
+function cleanRecognitionName(name) {
+  const original = String(name || "");
+  const ext = path.extname(original);
+  let text = original
+    .replace(/\.[A-Za-z0-9]{2,5}$/, "")
+    .normalize("NFKC")
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
+    .replace(/[·•★☆🔥🌙⚙️🎉🍺]/g, "")
+    .replace(/\b(?:1080P|2160P|UHD|WEB[-_. ]?DL|HEVC|H265|H264|AAC)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/[._-]{2,}/g, "-")
+    .replace(/^[\s._-]+|[\s._-]+$/g, "")
+    .trim();
+  text = trimHarmonyNoise(text);
+  if (!text) text = original.replace(/\.[A-Za-z0-9]{2,5}$/, "");
+  return `${text}${ext}`;
+}
+
+function trimHarmonyNoise(text) {
+  const value = String(text || "").trim();
+  if (!value) return value;
+
+  const special = value.match(/(.*?(?:特别加更|加更|纯享版?|精编特辑|特辑|特别篇|发布会|见面会|直播|首映礼|先导片|先导|副本存档中|副本解锁中|解锁中|采访|花絮|番外|未播|彩蛋|幕后|预告))/);
+  if (special) {
+    const tail = value.slice(special[0].length);
+    const versionTag = detectVersionTag(tail);
+    const indexTag = tail.match(/^\s*[（(]\s*\d+\s*[）)]/);
+    const followingEpisode = tail.match(/^[》）)]?\s*(第\s*\d+\s*期\s*(?:上|中|下)?)/);
+    return `${special[1]}${followingEpisode ? followingEpisode[1].replace(/\s+/g, "") : ""}${indexTag ? indexTag[0].trim() : ""}${versionTag ? `-${versionTag}` : ""}`.replace(/[\s._-]+$/g, "").trim();
+  }
+
+  const episode = value.match(/(第\s*\d+\s*期\s*(?:上|中|下)?)/);
+  if (episode) {
+    const head = value.slice(0, episode.index);
+    const tail = value.slice(episode.index + episode[0].length);
+    const versionTag = detectVersionTag(tail);
+    return `${head}${episode[1]}${versionTag}`
+      .replace(/\s+/g, "")
+      .replace(/[\s._-]+$/g, "")
+      .trim();
+  }
+  return value;
+}
+
+function detectVersionTag(text) {
+  const value = String(text || "");
+  const tags = [];
+  if (/完整版|完整/.test(value)) tags.push("完整版");
+  if (/会员版/.test(value)) tags.push("会员版");
+  if (/高码率|高码/.test(value)) tags.push("高码率");
+  if (/杜比|Dolby/i.test(value)) tags.push("杜比");
+  if (/(^|[\s._-])HDR版?($|[\s._-])/i.test(value)) tags.push("HDR");
+  if (/(^|[\s._-])4K版?($|[\s._-])/i.test(value)) tags.push("4K");
+  return Array.from(new Set(tags)).join("-");
 }
 
 function parseAiJson(text) {
@@ -1105,3 +1354,11 @@ async function telegramSend(chatId, text) {
     body: JSON.stringify({ chat_id: chatId, text: String(text).slice(0, 3900) })
   });
 }
+
+export const __test = {
+  chat,
+  normalizeCandidate,
+  sortCandidatesByTime,
+  extractShareUrl,
+  normalizeAiRenameItems
+};

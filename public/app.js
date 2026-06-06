@@ -12,8 +12,12 @@ const state = {
   lastPreviewFiles: [],
   aiConfig: { enabled: false, configured: false, confidenceThreshold: 0.75 },
   aiByName: new Map(),
-  aiMediaType: ""
+  aiMediaType: "",
+  suffixConfig: { systemDisabled: [], user: [] },
+  suffixDecisions: new Map()
 };
+
+const SYSTEM_VERSION_SUFFIXES = ["完整版", "会员版", "高码率", "杜比", "HDR", "4K"];
 
 const els = {
   status: document.querySelector("#status"),
@@ -48,6 +52,8 @@ const els = {
   cleanupMatchingTasks: document.querySelector("#cleanupMatchingTasks"),
   cleanupBeforeCreate: document.querySelector("#cleanupBeforeCreate"),
   previewShare: document.querySelector("#previewShare"),
+  reviewWithAi: document.querySelector("#reviewWithAi"),
+  manageSuffixes: document.querySelector("#manageSuffixes"),
   previewList: document.querySelector("#previewList"),
   previewCount: document.querySelector("#previewCount"),
   breadcrumb: document.querySelector("#breadcrumb"),
@@ -129,6 +135,8 @@ els.applyRename.addEventListener("click", () => {
   previewShare();
 });
 els.previewShare.addEventListener("click", previewShare);
+els.reviewWithAi.addEventListener("click", reviewCurrentPreviewWithAi);
+els.manageSuffixes.addEventListener("click", openSuffixManager);
 els.createAllDirs.addEventListener("click", createAllDirectoryTasks);
 els.cleanupMatchingTasks.addEventListener("click", cleanupCurrentTaskFamily);
 els.renameModeSwitch.addEventListener("click", (event) => {
@@ -183,6 +191,7 @@ async function enterApp() {
   if (config.success) {
     state.defaultSaveRoot = config.data.defaultSaveRoot || state.defaultSaveRoot;
     applyAiConfig(config.data.ai || {});
+    applySuffixConfig(config.data.suffixes || {});
   }
   await checkHealth();
 }
@@ -211,6 +220,9 @@ function switchView(view) {
   els.viewPanels.forEach((panel) => {
     panel.classList.toggle("active-view", panel.dataset.viewPanel === view);
   });
+  if (typeof window.scrollTo === "function") {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 }
 
 function setRenameMode(mode, { rerender = true } = {}) {
@@ -228,6 +240,8 @@ function applyAiConfig(config) {
     hasApiKey: Boolean(config.hasApiKey),
     baseUrl: config.baseUrl || "",
     model: config.model || "",
+    source: config.source || "saved",
+    editable: config.editable !== false,
     confidenceThreshold: Number(config.confidenceThreshold || 0.75),
     timeoutMs: Number(config.timeoutMs || 20000)
   };
@@ -236,7 +250,25 @@ function applyAiConfig(config) {
   els.aiModel.value = state.aiConfig.model;
   els.aiApiKey.value = "";
   els.aiConfidenceThreshold.value = state.aiConfig.confidenceThreshold;
+  applyAiEditMode();
   updateAiStatus();
+}
+
+function applySuffixConfig(config = {}) {
+  state.suffixConfig = {
+    systemDisabled: Array.isArray(config.systemDisabled) ? config.systemDisabled : [],
+    user: Array.isArray(config.user) ? config.user : []
+  };
+}
+
+function applyAiEditMode() {
+  const editable = state.aiConfig.editable !== false;
+  [els.aiEnabled, els.aiBaseUrl, els.aiModel, els.aiApiKey, els.aiConfidenceThreshold].forEach((input) => {
+    input.disabled = !editable;
+  });
+  els.saveAiConfig.disabled = !editable;
+  els.saveAiConfig.textContent = editable ? "保存 AI 配置" : "ENV 管理";
+  els.aiApiKey.placeholder = editable ? "留空则沿用已保存 Key" : "由 .env 提供，不在网页显示";
 }
 
 function aiConfigFromForm() {
@@ -251,6 +283,11 @@ function aiConfigFromForm() {
 }
 
 async function saveAiConfig() {
+  if (state.aiConfig.editable === false) {
+    updateAiStatus("由 .env 管理", "ok");
+    addMessage("assistant", "AI 配置由 .env 管理，请修改 .env 后重启服务。");
+    return;
+  }
   els.saveAiConfig.disabled = true;
   els.saveAiConfig.textContent = "保存中";
   const result = await api("/api/ai/config", {
@@ -283,10 +320,11 @@ async function testAiConfig() {
 }
 
 function updateAiStatus(text = "", tone = "") {
+  const source = state.aiConfig.source === "env" ? "ENV" : "网页";
   const status = text || (
     state.aiConfig.enabled
       ? state.aiConfig.configured
-        ? `已配置 ${state.aiConfig.model || ""}`.trim()
+        ? `${source} 已配置 ${state.aiConfig.model || ""}`.trim()
         : "已开启，未配置"
       : "未开启"
   );
@@ -353,7 +391,7 @@ function renderCandidatePage() {
     card.className = "candidate";
     card.innerHTML = `
       <h3>${escapeHtml(item.title)}</h3>
-      <p>${escapeHtml(item.source || "未知来源")} · 已验证${Number.isFinite(item.detailCount) ? ` · ${escapeHtml(item.detailCount)} 项` : ""}</p>
+      <p>${escapeHtml(item.source || "未知来源")}${item.displayTime || item.timeText ? ` · ${escapeHtml(item.displayTime || item.timeText)}` : ""} · 已验证${Number.isFinite(item.detailCount) ? ` · ${escapeHtml(item.detailCount)} 项` : ""}</p>
       <p>${escapeHtml(item.shareurl)}</p>
       <button type="button">填入任务</button>
     `;
@@ -504,6 +542,7 @@ async function loadSharePreview({ name = "顶层", shareUrl, mode = "reset" }) {
     state.previewPath.push({ name, shareUrl: targetShareUrl });
   } else if (mode === "reset") {
     state.previewPath = [{ name, shareUrl: targetShareUrl }];
+    state.suffixDecisions = new Map();
   } else if (!state.previewPath.length) {
     state.previewPath = [{ name, shareUrl: targetShareUrl }];
   }
@@ -530,7 +569,7 @@ async function loadSharePreview({ name = "顶层", shareUrl, mode = "reset" }) {
   state.lastPreviewFiles = files;
   renderPreview(files);
   switchView("preview");
-  await applyAiRenamePreview(state.lastPreviewRawFiles);
+  updateAiStatus(state.aiConfig.enabled && state.aiConfig.configured ? "本地预览，按需 AI 检查" : "");
 }
 
 function buildRenamePreview(files, aiByName = state.aiByName) {
@@ -539,38 +578,100 @@ function buildRenamePreview(files, aiByName = state.aiByName) {
   const pad = Math.max(1, Number(els.renamePad.value || 3));
   const sorted = [...files].sort((a, b) => {
     if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-    const ea = analyzeFileName(a.name, state.renameMode, 99999);
-    const eb = analyzeFileName(b.name, state.renameMode, 99999);
+    const ea = analyzeFileName(cleanRecognitionName(a.name), state.renameMode, 99999);
+    const eb = analyzeFileName(cleanRecognitionName(b.name), state.renameMode, 99999);
     if (ea.sortNumber !== eb.sortNumber) return ea.sortNumber - eb.sortNumber;
     return a.name.localeCompare(b.name, "zh-CN");
   });
 
   let nextFallbackNumber = start;
-  return sorted.map((file) => {
+  const previewFiles = sorted.map((file, index) => {
     const ext = extensionOf(file.name);
+    const fileId = fileIdentity(file, index);
     const fallbackNumber = nextFallbackNumber;
-    const localAnalysis = analyzeFileName(file.name, state.renameMode, fallbackNumber);
-    const aiItem = state.aiConfig.enabled ? aiByName.get(file.name) : null;
-    const analysis = aiItem ? mergeAiAnalysis(localAnalysis, aiItem) : localAnalysis;
+    const cleanName = cleanRecognitionName(file.name);
+    const localAnalysis = analyzeFileName(cleanName, state.renameMode, fallbackNumber);
+    const aiItem = state.aiConfig.enabled ? findAiItem(aiByName, file, index) : null;
+    const aiFileType = aiItem ? normalizeAiFileType(aiItem.fileType || aiItem.contentType || aiItem.special || "") : "";
+    const mergedAnalysis = aiItem ? mergeAiAnalysis(localAnalysis, aiItem) : localAnalysis;
+    const analysis = applySuffixDecision(mergedAnalysis, fileId);
     if (!file.isDir && isVideoFile(file.name) && analysis.countsAsEpisode !== false) {
       nextFallbackNumber += 1;
     }
     const generated = file.isDir
       ? file.name
       : prefix
-      ? buildPreviewName(prefix, ext, analysis, pad, file.name)
+      ? buildPreviewName(prefix, ext, analysis, pad, cleanName)
       : file.renamed || file.name;
     return {
       ...file,
+      fileId,
       analysis,
       episode: analysis.number,
       episodeLabel: analysis.label,
       fileType: analysis.fileType || "main",
+      localFileType: localAnalysis.fileType || "main",
+      aiFileType,
+      cleanName,
       aiMediaType: aiItem?.mediaType || "",
       aiConfidence: aiItem ? aiItem.confidence : null,
       aiReason: aiItem?.reason || "",
-      needsConfirm: analysis.confidence !== "high",
+      aiSuggestion: aiItem ? aiSuggestionText(aiFileType, aiItem) : "",
+      unknownSuffixes: analysis.unknownSuffixes || [],
+      needsConfirm: analysis.confidence !== "high" || Boolean(analysis.unknownSuffixes?.length),
       previewName: generated
+    };
+  });
+  return markPreviewConflicts(previewFiles);
+}
+
+function fileIdentity(file, index = 0) {
+  return String(file?.fileId || file?.fid || `${index}:${file?.name || ""}`);
+}
+
+function findAiItem(aiByName, file, index = 0) {
+  if (!aiByName || typeof aiByName.get !== "function") return null;
+  const fileId = fileIdentity(file, index);
+  return aiByName.get(fileId) || aiByName.get(file?.name) || null;
+}
+
+function suffixDecision(fileId) {
+  if (!state.suffixDecisions.has(fileId)) {
+    state.suffixDecisions.set(fileId, { keep: [], ignore: [] });
+  }
+  return state.suffixDecisions.get(fileId);
+}
+
+function applySuffixDecision(analysis, fileId) {
+  if (!analysis || analysis.mode !== "variety" || analysis.countsAsEpisode === false) return analysis;
+  const decision = suffixDecision(fileId);
+  const ignored = new Set(decision.ignore || []);
+  const kept = new Set(decision.keep || []);
+  const unknownSuffixes = (analysis.unknownSuffixes || []).filter((item) => !ignored.has(item) && !kept.has(item));
+  const versionTag = mergeTags(analysis.versionTag, [...kept].join("-"));
+  const confidence = unknownSuffixes.length ? "low" : analysis.confidence;
+  return {
+    ...analysis,
+    versionTag,
+    unknownSuffixes,
+    confidence
+  };
+}
+
+function markPreviewConflicts(files) {
+  const counts = new Map();
+  (files || []).forEach((file) => {
+    if (file.isDir || !file.previewName) return;
+    const key = file.previewName.trim();
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return (files || []).map((file) => {
+    if (file.isDir || !file.previewName || (counts.get(file.previewName.trim()) || 0) < 2) return file;
+    return {
+      ...file,
+      hasConflict: true,
+      needsConfirm: true,
+      conflictMessage: "命名冲突"
     };
   });
 }
@@ -589,8 +690,9 @@ async function applyAiRenamePreview(rawFiles) {
   updateAiStatus("AI 判断中");
   const result = await fetchAiRenameItems(rawFiles);
   if (!result.success) {
-    updateAiStatus("AI 失败，本地兜底", "bad");
-    addMessage("assistant", `AI 判断失败，已保留本地规则：${result.message || "未知错误"}`);
+    const reason = result.message || "未知错误";
+    updateAiStatus(`AI 失败：${reason}`.slice(0, 80), "bad");
+    addMessage("assistant", `AI 判断失败，已保留本地规则：${reason}`);
     return;
   }
   state.aiByName = result.itemsByName;
@@ -600,6 +702,23 @@ async function applyAiRenamePreview(rawFiles) {
   }
   updateAiStatus(`AI 已判断 ${result.itemsByName.size} 个文件`, "ok");
   rerenderCurrentPreview();
+}
+
+async function reviewCurrentPreviewWithAi() {
+  if (!state.lastPreviewRawFiles.length) {
+    addMessage("assistant", "请先预览文件，再让 AI 检查。");
+    return;
+  }
+  if (!state.aiConfig.enabled || !state.aiConfig.configured) {
+    updateAiStatus("AI 未启用或未配置", "bad");
+    addMessage("assistant", "AI 未启用或未配置，当前只能使用本地规则。");
+    return;
+  }
+  els.reviewWithAi.disabled = true;
+  els.reviewWithAi.textContent = "AI 检查中";
+  await applyAiRenamePreview(state.lastPreviewRawFiles);
+  els.reviewWithAi.disabled = false;
+  els.reviewWithAi.textContent = "AI 检查预览";
 }
 
 async function fetchAiRenameItems(rawFiles) {
@@ -620,7 +739,7 @@ async function fetchAiRenameItems(rawFiles) {
   if (!response.success) return response;
   const itemsByName = new Map();
   (response.data?.items || []).forEach((item) => {
-    itemsByName.set(item.originalName, item);
+    itemsByName.set(item.fileId || item.originalName, item);
   });
   return {
     success: true,
@@ -632,6 +751,15 @@ async function fetchAiRenameItems(rawFiles) {
 
 function mergeAiAnalysis(localAnalysis, aiItem) {
   const fileType = normalizeAiFileType(aiItem.fileType || aiItem.contentType || aiItem.special || localAnalysis.fileType);
+  const protectedLocalMain = localAnalysis.fileType === "main" && localAnalysis.confidence === "high";
+  const protectedLocalSpecial = localAnalysis.countsAsEpisode === false && localAnalysis.fileType && localAnalysis.fileType !== "unknown";
+  if (protectedLocalSpecial || (protectedLocalMain && fileType !== "main")) {
+    return {
+      ...localAnalysis,
+      mode: aiItem.mediaType || localAnalysis.mode,
+      confidence: aiItem.needsConfirm ? "low" : localAnalysis.confidence
+    };
+  }
   if (fileType !== "main") {
     const label = aiTypeLabel(fileType) || aiItem.episodeLabel || localAnalysis.label || "待确认";
     return {
@@ -646,7 +774,9 @@ function mergeAiAnalysis(localAnalysis, aiItem) {
       countsAsEpisode: false
     };
   }
-  const number = Number.isFinite(Number(aiItem.number)) ? Number(aiItem.number) : localAnalysis.number;
+  const localHasNumber = Number.isFinite(Number(localAnalysis.number));
+  const number = localHasNumber ? localAnalysis.number : Number.isFinite(Number(aiItem.number)) ? Number(aiItem.number) : localAnalysis.number;
+  const aiVersionTag = normalizeVersionTags(aiItem.versionTag || aiItem.versionTags || "");
   return {
     ...localAnalysis,
     mode: aiItem.mediaType || localAnalysis.mode,
@@ -654,7 +784,8 @@ function mergeAiAnalysis(localAnalysis, aiItem) {
     confidence: aiItem.needsConfirm ? "low" : "high",
     number,
     sortNumber: number || localAnalysis.sortNumber,
-    label: aiItem.episodeLabel || localAnalysis.label,
+    label: localAnalysis.label || aiItem.episodeLabel || `第${number}期`,
+    versionTag: mergeTags(localAnalysis.versionTag, aiVersionTag),
     countsAsEpisode: true
   };
 }
@@ -667,7 +798,7 @@ function normalizeAiFileType(value) {
   if (["special", "特辑", "特别篇"].includes(text) || text.includes("特辑") || text.includes("特别")) return "special";
   if (["press", "发布会"].includes(text) || text.includes("发布")) return "press";
   if (["pilot", "先导片"].includes(text) || text.includes("先导")) return "pilot";
-  if (["extra", "花絮", "番外", "预告"].includes(text) || /花絮|番外|预告|未播|彩蛋/.test(text)) return "extra";
+  if (["extra", "花絮", "番外", "预告", "衍生"].includes(text) || /副本解锁|解锁中|花絮|番外|预告|未播|彩蛋/.test(text)) return "extra";
   return "unknown";
 }
 
@@ -679,9 +810,16 @@ function aiTypeLabel(type) {
     special: "特辑",
     press: "发布会",
     pilot: "先导片",
-    extra: "花絮",
+    extra: "衍生",
     unknown: "待确认"
   }[type] || "";
+}
+
+function aiSuggestionText(fileType, aiItem) {
+  const label = aiTypeLabel(fileType) || "未知";
+  const reason = String(aiItem?.reason || "").trim();
+  const confirm = aiItem?.needsConfirm ? "待确认" : label;
+  return reason ? `AI判断：${confirm}，${reason}` : `AI判断：${confirm}`;
 }
 
 function aiTypeSort(type) {
@@ -747,16 +885,20 @@ function renderPreview(files) {
       lastGroup = group;
     }
     const row = document.createElement("article");
-    row.className = `preview-row${file.isDir ? " is-dir" : ""}`;
+    row.className = `preview-row${file.isDir ? " is-dir" : ""}${file.hasConflict ? " has-conflict" : ""}`;
     row.innerHTML = `
       <div class="file-main">
         <p class="from">${escapeHtml(file.isDir ? `目录：${file.name}` : file.name)}${file.isDir && file.size ? `（${escapeHtml(file.size)} 项）` : ""}</p>
+        ${!file.isDir && file.cleanName && file.cleanName !== file.name ? `<p class="clean">识别名：${escapeHtml(file.cleanName)}</p>` : ""}
+        ${!file.isDir && file.aiSuggestion ? `<p class="ai-note">${escapeHtml(file.aiSuggestion)}</p>` : ""}
         <p class="to">${escapeHtml(file.isDir ? "进入目录查看文件" : file.previewName || file.renamed || file.name)}</p>
+        ${!file.isDir && file.unknownSuffixes?.length ? renderUnknownSuffixPrompt(file) : ""}
       </div>
       <div class="file-meta">
         ${file.isDir ? '<span class="pill blue">目录</span>' : `<span class="pill blue">${escapeHtml(file.episodeLabel || `第 ${file.episode} 集`)}</span>`}
         ${!file.isDir && file.aiMediaType ? `<span class="pill gray">${escapeHtml(file.aiMediaType === "variety" ? "综艺" : file.aiMediaType === "tv" ? "电视剧" : "未知")}</span>` : ""}
         ${!file.isDir && file.aiConfidence !== null ? `<span class="pill gray">AI ${escapeHtml(Math.round(file.aiConfidence * 100))}%</span>` : ""}
+        ${!file.isDir && file.hasConflict ? '<span class="pill red">命名冲突</span>' : ""}
         ${!file.isDir && file.needsConfirm ? '<span class="pill orange">待确认</span>' : ""}
         ${file.isDir ? "" : `<span class="pill green">${escapeHtml(formatSize(file.size))}</span>`}
       </div>
@@ -777,13 +919,174 @@ function renderPreview(files) {
         }
       });
     }
+    row.querySelectorAll("[data-suffix-action]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handleSuffixAction(button.dataset.suffixAction, file.fileId, button.dataset.suffixValue);
+      });
+    });
     els.previewList.append(row);
   });
   renderBreadcrumb();
 }
 
+function renderUnknownSuffixPrompt(file) {
+  const suffixes = file.unknownSuffixes || [];
+  return suffixes.map((suffix) => `
+    <div class="suffix-prompt">
+      <strong>发现新后缀：${escapeHtml(suffix)}</strong>
+      <p>不会自动写入最终文件名，先由你确认。</p>
+      <div class="suffix-actions">
+        <button type="button" data-suffix-action="keep" data-suffix-value="${escapeHtml(suffix)}">保留本次</button>
+        <button type="button" data-suffix-action="add" data-suffix-value="${escapeHtml(suffix)}">加入常用</button>
+        <button type="button" data-suffix-action="ignore" data-suffix-value="${escapeHtml(suffix)}">忽略</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+async function handleSuffixAction(action, fileId, suffix) {
+  const value = cleanSuffixValue(suffix);
+  if (!value || !fileId) return;
+  if (action === "keep") {
+    const decision = suffixDecision(fileId);
+    decision.keep = Array.from(new Set([...(decision.keep || []), value]));
+    decision.ignore = (decision.ignore || []).filter((item) => item !== value);
+    rerenderCurrentPreview();
+    return;
+  }
+  if (action === "ignore") {
+    const decision = suffixDecision(fileId);
+    decision.ignore = Array.from(new Set([...(decision.ignore || []), value]));
+    decision.keep = (decision.keep || []).filter((item) => item !== value);
+    rerenderCurrentPreview();
+    return;
+  }
+  if (action === "add") {
+    const result = await api("/api/suffixes", {
+      method: "POST",
+      body: JSON.stringify({ value })
+    });
+    if (result.success) {
+      applySuffixConfig(result.data || {});
+      addMessage("assistant", `已加入常用后缀：${value}`);
+      rerenderCurrentPreview();
+    } else {
+      addMessage("assistant", result.message || "加入常用后缀失败");
+    }
+  }
+}
+
+function openSuffixManager() {
+  const overlay = document.createElement("section");
+  overlay.className = "task-picker-backdrop";
+  overlay.innerHTML = `
+    <div class="task-picker suffix-manager" role="dialog" aria-modal="true" aria-label="常用后缀管理">
+      <header>
+        <h2>常用后缀管理</h2>
+        <button type="button" data-action="close">关闭</button>
+      </header>
+      <div class="suffix-add-row">
+        <input data-role="new-suffix" placeholder="输入后缀，例如：臻彩版" />
+        <button type="button" data-action="add-user">添加</button>
+      </div>
+      <div class="task-picker-list" data-role="suffix-list"></div>
+      <footer>
+        <small>用户添加的后缀可以删除；系统内置后缀只能关闭。</small>
+        <button type="button" data-action="close">完成</button>
+      </footer>
+    </div>
+  `;
+  const list = overlay.querySelector("[data-role='suffix-list']");
+  const input = overlay.querySelector("[data-role='new-suffix']");
+
+  const render = () => {
+    const disabled = new Set((state.suffixConfig.systemDisabled || []).map(cleanSuffixValue));
+    list.innerHTML = `
+      <p class="preview-group-title">系统内置</p>
+      ${SYSTEM_VERSION_SUFFIXES.map((suffix) => `
+        <div class="suffix-row">
+          <div>
+            <strong>${escapeHtml(suffix)}</strong>
+            <small>${disabled.has(suffix) ? "已关闭" : "自动保留"}</small>
+          </div>
+          <button type="button" data-action="toggle-system" data-suffix-value="${escapeHtml(suffix)}">${disabled.has(suffix) ? "开启" : "关闭"}</button>
+        </div>
+      `).join("")}
+      <p class="preview-group-title">用户添加</p>
+      ${(state.suffixConfig.user || []).length ? (state.suffixConfig.user || []).map((suffix) => `
+        <div class="suffix-row">
+          <div>
+            <strong>${escapeHtml(suffix)}</strong>
+            <small>自动保留</small>
+          </div>
+          <button class="danger" type="button" data-action="remove-user" data-suffix-value="${escapeHtml(suffix)}">删除</button>
+        </div>
+      `).join("") : '<p class="picker-note">还没有用户添加的常用后缀。</p>'}
+    `;
+  };
+
+  overlay.addEventListener("click", async (event) => {
+    const action = event.target.dataset.action;
+    if (!action) return;
+    if (action === "close") {
+      overlay.remove();
+      return;
+    }
+    if (action === "add-user") {
+      const value = cleanSuffixValue(input.value);
+      if (!value) return;
+      const result = await api("/api/suffixes", {
+        method: "POST",
+        body: JSON.stringify({ value })
+      });
+      if (result.success) {
+        applySuffixConfig(result.data || {});
+        input.value = "";
+        render();
+        rerenderCurrentPreview();
+      } else {
+        addMessage("assistant", result.message || "添加后缀失败");
+      }
+      return;
+    }
+    const suffix = cleanSuffixValue(event.target.dataset.suffixValue);
+    if (action === "remove-user") {
+      const result = await api(`/api/suffixes?value=${encodeURIComponent(suffix)}`, { method: "DELETE" });
+      if (result.success) {
+        applySuffixConfig(result.data || {});
+        render();
+        rerenderCurrentPreview();
+      } else {
+        addMessage("assistant", result.message || "删除后缀失败");
+      }
+      return;
+    }
+    if (action === "toggle-system") {
+      const disabled = new Set((state.suffixConfig.systemDisabled || []).map(cleanSuffixValue));
+      const result = await api("/api/suffixes/system", {
+        method: "POST",
+        body: JSON.stringify({ value: suffix, enabled: disabled.has(suffix) })
+      });
+      if (result.success) {
+        applySuffixConfig(result.data || {});
+        render();
+        rerenderCurrentPreview();
+      } else {
+        addMessage("assistant", result.message || "修改系统后缀失败");
+      }
+    }
+  });
+
+  render();
+  document.body.append(overlay);
+  input.focus();
+}
+
 function previewGroup(file) {
   if (file.isDir) return "目录";
+  if (file.hasConflict) return "命名冲突";
   if (file.needsConfirm || file.fileType === "unknown") return "待确认";
   if (file.fileType && file.fileType !== "main") return "特殊内容";
   return "正片";
@@ -961,13 +1264,12 @@ function selectFileTaskPlan(baseTask) {
           node.loading = false;
           node.loaded = true;
           if (result.success) {
-            const aiResult = await fetchAiRenameItems(result.data || []);
             node.files = buildPickerEntries(result.data || [], {
               baseTask,
               shareurl: node.shareurl,
               savepath: node.savepath,
               taskSuffix: node.taskSuffix,
-              aiByName: aiResult.success ? aiResult.itemsByName : new Map(),
+              aiByName: new Map(),
               depth: node.depth
             });
           } else {
@@ -1302,7 +1604,7 @@ function buildPreviewName(prefix, ext, analysis, pad, originalName = "") {
       const title = cleanPathName(stripExtension(originalName));
       return `${prefix}-${title}${ext}`;
     }
-    return `${prefix}${analysis.label}${ext}`;
+    return `${prefix}${analysis.dateToken ? `-${analysis.dateToken}` : ""}-${analysis.label}${analysis.versionTag ? `-${cleanPathName(analysis.versionTag)}` : ""}${ext}`;
   }
   return `${prefix}${String(analysis.number).padStart(pad, "0")}${ext}`;
 }
@@ -1346,17 +1648,23 @@ function analyzeTvFileName(name, fallbackNumber = 1) {
 
 function analyzeVarietyFileName(name, fallbackNumber = 1) {
   const text = String(name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
+  const dateToken = extractDateToken(text);
+  const semanticTitle = extractSemanticTitle(text);
   const special = detectVarietySpecial(text);
   const explicit = text.match(/第\s*0*(\d{1,4})\s*期\s*(上|中|下)?/);
-  if (special) {
+  if (special || semanticTitle) {
+    const label = special?.label || "待确认";
+    const type = special?.type || "unknown";
+    const title = specialTitle(text, special?.label || "衍生", semanticTitle);
     return {
       mode: "variety",
-      fileType: special.type,
-      confidence: "high",
+      fileType: type,
+      confidence: special ? "high" : "low",
       number: null,
-      sortNumber: special.sortNumber,
-      label: special.label,
-      title: specialTitle(text, special.label),
+      sortNumber: special?.sortNumber || 99000 + fallbackNumber,
+      label,
+      title,
+      dateToken,
       countsAsEpisode: false
     };
   }
@@ -1364,13 +1672,19 @@ function analyzeVarietyFileName(name, fallbackNumber = 1) {
   if (explicit) {
     const number = Number(explicit[1]);
     const part = explicit[2] || "";
+    const suffixText = text.slice(explicit.index + explicit[0].length);
+    const versionTag = detectVersionTag(suffixText);
+    const unknownSuffixes = detectUnknownSuffixTags(suffixText);
     return {
       mode: "variety",
       fileType: "main",
-      confidence: "high",
+      confidence: unknownSuffixes.length ? "low" : "high",
       number,
       sortNumber: number,
       label: `第${number}期${part}`,
+      versionTag,
+      unknownSuffixes,
+      dateToken,
       countsAsEpisode: true
     };
   }
@@ -1384,6 +1698,7 @@ function analyzeVarietyFileName(name, fallbackNumber = 1) {
       sortNumber: 99000 + fallbackNumber,
       label: "待确认",
       title: text,
+      dateToken,
       countsAsEpisode: false
     };
   }
@@ -1392,13 +1707,19 @@ function analyzeVarietyFileName(name, fallbackNumber = 1) {
   if (loose) {
     const number = Number(loose[1]);
     const part = loose[2] || "";
+    const suffixText = text.slice(loose.index + loose[0].length);
+    const versionTag = detectVersionTag(suffixText);
+    const unknownSuffixes = detectUnknownSuffixTags(suffixText);
     return {
       mode: "variety",
       fileType: "main",
-      confidence: "medium",
+      confidence: unknownSuffixes.length ? "low" : "medium",
       number,
       sortNumber: number,
       label: `第${number}期${part}`,
+      versionTag,
+      unknownSuffixes,
+      dateToken,
       countsAsEpisode: true
     };
   }
@@ -1411,6 +1732,7 @@ function analyzeVarietyFileName(name, fallbackNumber = 1) {
     sortNumber: 99000 + fallbackNumber,
     label: "待确认",
     title: text,
+    dateToken,
     countsAsEpisode: false
   };
 }
@@ -1422,13 +1744,101 @@ function detectVarietySpecial(text) {
     { type: "special", label: "特辑", sortNumber: 93000, pattern: /特辑|特别篇|精编|合集|回顾/ },
     { type: "press", label: "发布会", sortNumber: 94000, pattern: /发布会|见面会|直播|首映礼/ },
     { type: "pilot", label: "先导片", sortNumber: 95000, pattern: /先导片|先导|超前企划/ },
-    { type: "extra", label: "花絮", sortNumber: 96000, pattern: /花絮|番外|未播|彩蛋|幕后|会员版|预告/ }
+    { type: "extra", label: "衍生", sortNumber: 96000, pattern: /副本存档中|副本解锁中|解锁中|采访|花絮|番外|未播|彩蛋|幕后|预告/ }
   ];
   return rules.find((rule) => rule.pattern.test(String(text || ""))) || null;
 }
 
-function specialTitle(text, label) {
+function extractDateToken(text) {
+  const match = String(text || "").match(/((?:19|20)\d{2})[年._/-]?((?:1[0-2]|0?[1-9]))[月._/-]?((?:3[01]|[12]\d|0?[1-9]))/);
+  if (!match) return "";
+  return `${match[1]}${match[2].padStart(2, "0")}${match[3].padStart(2, "0")}`;
+}
+
+function extractSemanticTitle(text) {
+  const value = String(text || "").replace(/\.[A-Za-z0-9]{2,5}$/, "").trim();
+  const episode = value.match(/第\s*\d+\s*期/);
+  if (!episode) return "";
+  const beforeEpisode = value.slice(0, episode.index);
+  const withoutDate = beforeEpisode
+    .replace(/(?:19|20)\d{2}[年._/-]?(?:1[0-2]|0?[1-9])[月._/-]?(?:3[01]|[12]\d|0?[1-9])/g, "")
+    .replace(/[\s._-]+/g, "")
+    .replace(/[《》「」『』【】[\]()（）]/g, "")
+    .trim();
+  if (!withoutDate) return "";
+  if (/^(上|中|下|完整版|会员版|高码率|高码|4K|HDR|杜比)$/i.test(withoutDate)) return "";
+  return withoutDate;
+}
+
+function detectVersionTag(text) {
+  const value = String(text || "");
+  const tags = [];
+  const known = enabledVersionSuffixes();
+  if (known.includes("完整版") && /完整版|完整/.test(value)) tags.push("完整版");
+  if (known.includes("会员版") && /会员版/.test(value)) tags.push("会员版");
+  if (known.includes("高码率") && /高码率|高码/.test(value)) tags.push("高码率");
+  if (known.includes("杜比") && /杜比|Dolby/i.test(value)) tags.push("杜比");
+  if (known.includes("HDR") && /(^|[\s._-])HDR版?($|[\s._-])/i.test(value)) tags.push("HDR");
+  if (known.includes("4K") && /(^|[\s._-])4K版?($|[\s._-])/i.test(value)) tags.push("4K");
+  userVersionSuffixes().forEach((suffix) => {
+    if (suffix && value.includes(suffix)) tags.push(suffix);
+  });
+  return Array.from(new Set(tags)).join("-");
+}
+
+function enabledVersionSuffixes() {
+  const disabled = new Set((state.suffixConfig.systemDisabled || []).map(cleanSuffixValue));
+  return SYSTEM_VERSION_SUFFIXES.filter((item) => !disabled.has(item));
+}
+
+function userVersionSuffixes() {
+  return (state.suffixConfig.user || []).map(cleanSuffixValue).filter(Boolean);
+}
+
+function cleanSuffixValue(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, "")
+    .trim()
+    .slice(0, 24);
+}
+
+function detectUnknownSuffixTags(text) {
+  let value = String(text || "").normalize("NFKC");
+  if (!value.trim()) return [];
+  const known = [...enabledVersionSuffixes(), ...userVersionSuffixes(), "60FPS", "FPS", "1080P", "2160P", "UHD", "WEB-DL", "H265", "H264", "HEVC", "AAC"];
+  known.forEach((tag) => {
+    if (!tag) return;
+    value = value.replace(new RegExp(escapeRegex(tag), "gi"), " ");
+  });
+  return Array.from(new Set(value
+    .split(/[\s._,，、/()-]+/)
+    .map(cleanSuffixValue)
+    .filter((item) => /^[\u4e00-\u9fa5]{2,8}版?$/.test(item) && !/^(上|中|下|完整|会员|高码|杜比)$/.test(item))));
+}
+
+function normalizeVersionTags(value) {
+  if (Array.isArray(value)) return mergeTags(...value);
+  return detectVersionTag(String(value || "")) || String(value || "").trim();
+}
+
+function mergeTags(...values) {
+  const tags = [];
+  values.forEach((value) => {
+    String(value || "")
+      .split(/[-/、,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((item) => tags.push(item));
+  });
+  return Array.from(new Set(tags)).join("-");
+}
+
+function specialTitle(text, label, semanticTitle = "") {
   const original = String(text || "").trim();
+  const dated = specialTitleWithDate(original);
+  if (dated) return dated;
   let cleaned = original
     .replace(/(?:19|20)\d{2}[._-]?(?:1[0-2]|0?[1-9])[._-]?(?:3[01]|[12]\d|0?[1-9])/g, "")
     .replace(/^[\s._-]+|[\s._-]+$/g, "")
@@ -1438,8 +1848,29 @@ function specialTitle(text, label) {
   }
   const genericTitles = new Set([label, `${label}版`, "纯享版", "发布会", "特辑", "加更", "花絮", "先导片"]);
   if (genericTitles.has(cleaned) && original !== cleaned) return original;
+  if (semanticTitle) {
+    const episode = original.match(/第\s*\d+\s*期\s*(?:上|中|下)?/);
+    const versionTag = detectVersionTag(original);
+    return `${extractDateToken(original) ? `${extractDateToken(original)}-` : ""}${semanticTitle}${episode ? episode[0].replace(/\s+/g, "") : ""}${versionTag ? `-${versionTag}` : ""}`;
+  }
   if (!cleaned) return label;
   return cleaned.includes(label) ? cleaned : `${label}-${cleaned}`;
+}
+
+function specialTitleWithDate(text) {
+  const match = String(text || "").match(/((?:19|20)\d{2})[._-]?((?:1[0-2]|0?[1-9]))[._-]?((?:3[01]|[12]\d|0?[1-9]))/);
+  if (!match) return "";
+  const date = `${match[1]}${match[2].padStart(2, "0")}${match[3].padStart(2, "0")}`;
+  const tail = String(text || "").slice(match.index + match[0].length);
+  const title = tail
+    .replace(/^[\s._-]+/, "")
+    .replace(/[\s._-]+$/g, "")
+    .replace(/[\s._-]+/g, "-")
+    .replace(/[《》]/g, "")
+    .trim();
+  if (!title) return date;
+  if (title.startsWith("期")) return `${date}${title}`;
+  return `${date}-${title}`;
 }
 
 function hasDateLikeText(text) {
@@ -1481,6 +1912,50 @@ function taskFileLabel(name) {
     return label.slice(prefix.length).trim();
   }
   return label;
+}
+
+function cleanRecognitionName(name) {
+  const ext = extensionOf(name);
+  let text = stripExtension(name)
+    .normalize("NFKC")
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
+    .replace(/[·•★☆🔥🌙⚙️🎉🍺]/g, "")
+    .replace(/\b(?:1080P|2160P|UHD|WEB[-_. ]?DL|HEVC|H265|H264|AAC)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/[._-]{2,}/g, "-")
+    .replace(/^[\s._-]+|[\s._-]+$/g, "")
+    .trim();
+  text = trimHarmonyNoise(text);
+  if (!text) text = stripExtension(name);
+  return `${text}${ext}`;
+}
+
+function trimHarmonyNoise(text) {
+  const value = String(text || "").trim();
+  if (!value) return value;
+
+  const special = value.match(/(.*?(?:特别加更|加更|纯享版?|精编特辑|特辑|特别篇|发布会|见面会|直播|首映礼|先导片|先导|副本存档中|副本解锁中|解锁中|采访|花絮|番外|未播|彩蛋|幕后|预告))/);
+  if (special) {
+    const tail = value.slice(special[0].length);
+    const versionTag = detectVersionTag(tail);
+    const indexTag = tail.match(/^\s*[（(]\s*\d+\s*[）)]/);
+    const followingEpisode = tail.match(/^[》）)]?\s*(第\s*\d+\s*期\s*(?:上|中|下)?)/);
+    return `${special[1]}${followingEpisode ? followingEpisode[1].replace(/\s+/g, "") : ""}${indexTag ? indexTag[0].trim() : ""}${versionTag ? `-${versionTag}` : ""}`.replace(/[\s._-]+$/g, "").trim();
+  }
+
+  const episode = value.match(/(第\s*\d+\s*期\s*(?:上|中|下)?)/);
+  if (episode) {
+    const head = value.slice(0, episode.index);
+    const tail = value.slice(episode.index + episode[0].length);
+    const versionTag = detectVersionTag(tail);
+    const unknownSuffixes = detectUnknownSuffixTags(tail);
+    const suffixTag = mergeTags(versionTag, unknownSuffixes.join("-"));
+    return `${head}${episode[1]}${suffixTag}`
+      .replace(/\s+/g, "")
+      .replace(/[\s._-]+$/g, "")
+      .trim();
+  }
+  return value;
 }
 
 function escapeRegex(value) {

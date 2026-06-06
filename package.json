@@ -5,7 +5,8 @@
   "description": "Chat-style web and bot assistant for QAS media search and Quark auto-save tasks.",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --check server.js && node --check public/app.js && node scripts/recognition-acceptance.mjs"
   },
   "engines": {
     "node": ">=20"
